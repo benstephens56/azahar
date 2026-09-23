@@ -216,21 +216,23 @@ TasInputWidget::TasInputWidget(Core::System& system_, QWidget* parent)
     top_row->addWidget(CreateTouchGroup());
     layout->addLayout(top_row);
 
-    // Second row: sticks and motion (accelerometer above gyroscope)
-    auto* bottom_row = new QHBoxLayout();
+    // Second row: sticks
+    auto* sticks_row = new QHBoxLayout();
     circle_pad_controls.id = Override::StickId::CirclePad;
     c_stick_controls.id = Override::StickId::CStick;
-    bottom_row->addWidget(
+    sticks_row->addWidget(
         CreateStickGroup(tr("Circle Pad"), circle_pad_controls, &Override::State::circle_pad));
-    bottom_row->addWidget(
+    sticks_row->addWidget(
         CreateStickGroup(tr("C-Stick"), c_stick_controls, &Override::State::c_stick));
-    auto* motion_column = new QVBoxLayout();
-    motion_column->addWidget(CreateMotionGroup(tr("Accelerometer"), accel_controls,
-                                               &Override::State::accel, AccelRange));
-    motion_column->addWidget(
+    layout->addLayout(sticks_row);
+
+    // Third row: motion sensors
+    auto* motion_row = new QHBoxLayout();
+    motion_row->addWidget(
         CreateMotionGroup(tr("Gyroscope"), gyro_controls, &Override::State::gyro, GyroRange));
-    bottom_row->addLayout(motion_column);
-    layout->addLayout(bottom_row);
+    motion_row->addWidget(CreateMotionGroup(tr("Accelerometer"), accel_controls,
+                                            &Override::State::accel, AccelRange));
+    layout->addLayout(motion_row);
 
     auto* note = new QLabel(tr("Bold values are set in this window and take priority over the "
                                "controller. Right click a pad to clear it."),
