@@ -80,7 +80,10 @@ Core::Timing& Global() {
     return System::GetInstance().CoreTiming();
 }
 
-System::System() : movie{*this}, cheat_engine{*this} {}
+System::System() : movie{*this}, cheat_engine{*this}, memory_editor{*this} {
+    // Lets memory edits made while frame advancing take effect without advancing a frame
+    frame_limiter.SetPausedWorkCallback([this] { memory_editor.Apply(); });
+}
 
 System::~System() = default;
 
@@ -102,6 +105,9 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
         GDBStub::HandlePacket(*this);
     }
 #endif
+
+    // Apply memory edits/freezes from frontend tools. Does nothing unless the user requested any.
+    memory_editor.Apply();
 
     Signal signal{Signal::None};
     u32 param{};
@@ -732,6 +738,7 @@ void System::Shutdown(bool is_deserializing) {
 
     gpu.reset();
     if (!is_deserializing) {
+        memory_editor.ClearAll();
         lle_modules.clear();
 #ifdef ENABLE_GDBSTUB
         GDBStub::Shutdown();

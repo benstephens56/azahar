@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <functional>
 #include <mutex>
 #include "common/bit_field.h"
 #include "common/common_types.h"
@@ -193,6 +194,16 @@ public:
     void AdvanceFrame();
     void WaitOnce();
 
+    /**
+     * Sets a callback that is run on the emulator thread when RequestPausedWork is called while it
+     * is waiting for a frame advance. Used to apply memory edits without advancing a frame.
+     */
+    void SetPausedWorkCallback(std::function<void()> callback) {
+        paused_work_callback = std::move(callback);
+    }
+    /// Wakes the emulator thread to run the paused work callback, without advancing a frame.
+    void RequestPausedWork();
+
 private:
     /// Emulated system time (in microseconds) at the last limiter invocation
     std::chrono::microseconds previous_system_time_us{0};
@@ -207,6 +218,14 @@ private:
 
     /// Event to advance the frame when frame advancing is enabled
     Common::Event frame_advance_event;
+
+    /// Waits on frame_advance_event until a frame advance is requested (or frame advancing is
+    /// disabled), running the paused work callback whenever it is requested in the meantime.
+    void WaitForAdvance();
+
+    std::atomic_bool advance_requested{false};
+    std::atomic_bool paused_work_requested{false};
+    std::function<void()> paused_work_callback;
 };
 
 } // namespace Core

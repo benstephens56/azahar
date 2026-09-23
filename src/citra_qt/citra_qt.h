@@ -62,6 +62,8 @@ class QProgressBar;
 class QPushButton;
 class QSlider;
 class RegistersWidget;
+class MemoryWatchWidget;
+class MemorySearchWidget;
 class WaitTreeWidget;
 
 namespace Camera {
@@ -435,6 +437,8 @@ private:
     MicroProfileDialog* microProfileDialog{};
 #endif
     RegistersWidget* registersWidget{};
+    MemoryWatchWidget* memoryWatchWidget{};
+    MemorySearchWidget* memorySearchWidget{};
     GPUCommandStreamWidget* graphicsWidget{};
     GPUCommandListWidget* graphicsCommandsWidget{};
     GraphicsBreakPointsWidget* graphicsBreakpointsWidget{};

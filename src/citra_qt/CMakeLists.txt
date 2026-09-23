@@ -121,6 +121,11 @@ add_library(citra_qt STATIC EXCLUDE_FROM_ALL
     debugger/lle_service_modules.h
     debugger/profiler.cpp
     debugger/profiler.h
+    debugger/memory_search.cpp
+    debugger/memory_search.h
+    debugger/memory_tools_common.h
+    debugger/memory_watch.cpp
+    debugger/memory_watch.h
     debugger/registers.cpp
     debugger/registers.h
     debugger/registers.ui

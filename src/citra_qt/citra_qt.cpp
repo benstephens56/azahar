@@ -61,6 +61,8 @@
 #if MICROPROFILE_ENABLED
 #include "citra_qt/debugger/profiler.h"
 #endif
+#include "citra_qt/debugger/memory_search.h"
+#include "citra_qt/debugger/memory_watch.h"
 #include "citra_qt/debugger/registers.h"
 #include "citra_qt/debugger/wait_tree.h"
 #ifdef ENABLE_DISCORD_RPC
@@ -733,6 +735,24 @@ void GMainWindow::InitializeDebugWidgets() {
             &RegistersWidget::OnEmulationStarting);
     connect(this, &GMainWindow::EmulationStopping, registersWidget,
             &RegistersWidget::OnEmulationStopping);
+
+    memoryWatchWidget = new MemoryWatchWidget(system, this);
+    addDockWidget(Qt::RightDockWidgetArea, memoryWatchWidget);
+    memoryWatchWidget->hide();
+    debug_menu->addAction(memoryWatchWidget->toggleViewAction());
+    connect(this, &GMainWindow::EmulationStarting, memoryWatchWidget,
+            &MemoryWatchWidget::OnEmulationStarting);
+    connect(this, &GMainWindow::EmulationStopping, memoryWatchWidget,
+            &MemoryWatchWidget::OnEmulationStopping);
+
+    memorySearchWidget = new MemorySearchWidget(system, memoryWatchWidget, this);
+    addDockWidget(Qt::RightDockWidgetArea, memorySearchWidget);
+    memorySearchWidget->hide();
+    debug_menu->addAction(memorySearchWidget->toggleViewAction());
+    connect(this, &GMainWindow::EmulationStarting, memorySearchWidget,
+            &MemorySearchWidget::OnEmulationStarting);
+    connect(this, &GMainWindow::EmulationStopping, memorySearchWidget,
+            &MemorySearchWidget::OnEmulationStopping);
 
     if (Pica::g_debug_context) {
         graphicsWidget = new GPUCommandStreamWidget(system, this);
@@ -3052,12 +3072,12 @@ void GMainWindow::OnAdvanceFrame() {
     // Advancing a frame while the emulation is running turns frame advancing on instead
     if (!system.frame_limiter.IsFrameAdvancing()) {
         OnPauseGame();
-        return;
+    } else {
+        system.frame_limiter.AdvanceFrame();
     }
 
-    system.frame_limiter.AdvanceFrame();
-
-    // Keep advancing frames for as long as the hotkey is held down
+    // Keep advancing frames for as long as the hotkey is held down, including when this press
+    // just turned frame advancing on
     frame_advance_hold_elapsed.start();
     frame_advance_hold_timer.start();
 }
@@ -3305,7 +3325,9 @@ void GMainWindow::OnCloseMovie() {
         movie_record_path.clear();
         movie_record_author.clear();
     } else {
-        const bool was_running = emu_thread && emu_thread->IsRunning();
+        // Frame advancing counts as paused, so it is kept on instead of being resumed afterwards
+        const bool was_running =
+            emu_thread && emu_thread->IsRunning() && !system.frame_limiter.IsFrameAdvancing();
         if (was_running) {
             OnPauseGame();
         }
@@ -3327,7 +3349,9 @@ void GMainWindow::OnCloseMovie() {
 }
 
 void GMainWindow::OnSaveMovie() {
-    const bool was_running = emu_thread && emu_thread->IsRunning();
+    // Frame advancing counts as paused, so it is kept on instead of being resumed afterwards
+    const bool was_running =
+        emu_thread && emu_thread->IsRunning() && !system.frame_limiter.IsFrameAdvancing();
     if (was_running) {
         OnPauseGame();
     }

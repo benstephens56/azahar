@@ -207,19 +207,29 @@ double PerfStats::GetStableFrameTimeScale() const {
     return stable_previous_frame_length / FRAME_LENGTH;
 }
 
+void FrameLimiter::WaitForAdvance() {
+    while (true) {
+        frame_advance_event.Wait();
+        if (paused_work_requested.exchange(false) && paused_work_callback) {
+            paused_work_callback();
+        }
+        if (advance_requested.exchange(false) || !frame_advancing_enabled) {
+            return;
+        }
+    }
+}
+
 void FrameLimiter::WaitOnce() {
     if (frame_advancing_enabled) {
         // Frame advancing is enabled: wait on event instead of doing framelimiting
-        frame_advance_event.Wait();
-        frame_advance_event.Reset();
+        WaitForAdvance();
     }
 }
 
 void FrameLimiter::DoFrameLimiting(microseconds current_system_time_us) {
     if (frame_advancing_enabled) {
         // Frame advancing is enabled: wait on event instead of doing framelimiting
-        frame_advance_event.Wait();
-        frame_advance_event.Reset();
+        WaitForAdvance();
         return;
     }
 
@@ -266,6 +276,12 @@ void FrameLimiter::SetFrameAdvancing(bool value) {
 }
 
 void FrameLimiter::AdvanceFrame() {
+    advance_requested = true;
+    frame_advance_event.Set();
+}
+
+void FrameLimiter::RequestPausedWork() {
+    paused_work_requested = true;
     frame_advance_event.Set();
 }
 
