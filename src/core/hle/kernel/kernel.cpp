@@ -8,6 +8,7 @@
 #include "common/archives.h"
 #include "common/serialization/atomic.h"
 #include "common/settings.h"
+#include "core/core.h"
 #include "core/hle/kernel/client_port.h"
 #include "core/hle/kernel/config_mem.h"
 #include "core/hle/kernel/handle_table.h"
@@ -19,6 +20,7 @@
 #include "core/hle/kernel/shared_page.h"
 #include "core/hle/kernel/thread.h"
 #include "core/hle/kernel/timer.h"
+#include "core/movie.h"
 
 SERIALIZE_EXPORT_IMPL(Kernel::New3dsHwCapabilities)
 
@@ -157,6 +159,15 @@ std::unique_ptr<IPCDebugger::Recorder> KernelSystem::BackupIPCRecorder() {
 
 void KernelSystem::RestoreIPCRecorder(std::unique_ptr<IPCDebugger::Recorder> recorder) {
     ipc_recorder = std::move(recorder);
+}
+
+bool KernelSystem::UseDeterministicAsyncOperations() const {
+    if (Settings::values.deterministic_async_operations) {
+        return true;
+    }
+    const auto play_mode = Core::System::GetInstance().Movie().GetPlayMode();
+    return play_mode == Core::Movie::PlayMode::Recording ||
+           play_mode == Core::Movie::PlayMode::Playing;
 }
 
 void KernelSystem::AddNamedPort(std::string name, std::shared_ptr<ClientPort> port) {
