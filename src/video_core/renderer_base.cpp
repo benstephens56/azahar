@@ -41,6 +41,10 @@ void RendererBase::UpdateCurrentFramebufferLayout(bool is_portrait_mode) {
 }
 
 void RendererBase::EndFrame() {
+    if (refreshing_screen) {
+        return;
+    }
+
     current_frame++;
 
     system.perf_stats->EndSystemFrame();
@@ -49,6 +53,12 @@ void RendererBase::EndFrame() {
 
     system.frame_limiter.DoFrameLimiting(system.CoreTiming().GetGlobalTimeUs());
     system.perf_stats->BeginSystemFrame();
+}
+
+void RendererBase::RefreshScreen() {
+    refreshing_screen = true;
+    SwapBuffers();
+    refreshing_screen = false;
 }
 
 bool RendererBase::IsScreenshotPending() const {

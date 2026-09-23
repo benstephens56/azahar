@@ -909,6 +909,10 @@ void GMainWindow::InitializeHotkeys() {
                          QStringLiteral("Save to Oldest Non-Quicksave Slot"));
     link_action_shortcut(ui->action_Quick_Save, QStringLiteral("Quick Save"));
     link_action_shortcut(ui->action_Quick_Load, QStringLiteral("Quick Load"));
+    for (u32 i = 1; i < Core::SaveStateSlotCount; ++i) {
+        link_action_shortcut(actions_load_state[i], QStringLiteral("Load from Slot %1").arg(i));
+        link_action_shortcut(actions_save_state[i], QStringLiteral("Save to Slot %1").arg(i));
+    }
     link_action_shortcut(ui->action_View_Lobby, QStringLiteral("Multiplayer Browse Public Rooms"));
     link_action_shortcut(ui->action_Start_Room, QStringLiteral("Multiplayer Create Room"));
     link_action_shortcut(ui->action_Connect_To_Room,
@@ -1105,6 +1109,17 @@ void GMainWindow::ConnectWidgetEvents() {
             &GRenderWindow::OnEmulationStopping);
 
     connect(&status_bar_update_timer, &QTimer::timeout, this, &GMainWindow::UpdateStatusBar);
+    // The movie frame counter is refreshed much more often than the rest of the status bar,
+    // whose performance statistics need a longer sampling window to be meaningful.
+    movie_status_update_timer.setTimerType(Qt::PreciseTimer);
+    connect(&movie_status_update_timer, &QTimer::timeout, this, &GMainWindow::UpdateMovieStatus);
+
+    frame_advance_hold_timer.setTimerType(Qt::PreciseTimer);
+    frame_advance_hold_timer.setInterval(16);
+    connect(&frame_advance_hold_timer, &QTimer::timeout, this,
+            &GMainWindow::OnFrameAdvanceHoldTick);
+    // Used to track whether the Advance Frame hotkey is being held down
+    QGuiApplication::instance()->installEventFilter(this);
 
     connect(this, &GMainWindow::UpdateProgress, this, &GMainWindow::OnUpdateProgress);
     connect(this, &GMainWindow::CIAInstallReport, this, &GMainWindow::OnCIAInstallReport);
@@ -1196,11 +1211,7 @@ void GMainWindow::ConnectMenuEvents() {
     connect_menu(ui->action_Save_Movie, &GMainWindow::OnSaveMovie);
     connect_menu(ui->action_Movie_Read_Only_Mode,
                  [this](bool checked) { movie.SetReadOnly(checked); });
-    connect_menu(ui->action_Advance_Frame, [this] {
-        if (emulation_running && system.frame_limiter.IsFrameAdvancing()) {
-            system.frame_limiter.AdvanceFrame();
-        }
-    });
+    connect_menu(ui->action_Advance_Frame, &GMainWindow::OnAdvanceFrame);
     connect_menu(ui->action_Capture_Screenshot, &GMainWindow::OnCaptureScreenshot);
     connect_menu(ui->action_Dump_Video, &GMainWindow::OnDumpVideo);
 
@@ -1260,7 +1271,8 @@ void GMainWindow::UpdateMenuState() {
     }
 
     ui->action_Capture_Screenshot->setEnabled(emulation_running);
-    ui->action_Advance_Frame->setEnabled(emulation_running && is_paused);
+    // Advance Frame also enables frame advancing when used while emulation is running
+    ui->action_Advance_Frame->setEnabled(emulation_running);
 
     if (emulation_running && is_paused) {
         ui->action_Pause->setText(tr("Continue"));
@@ -1518,6 +1530,11 @@ void GMainWindow::BootGame(const QString& filename) {
             title_id == 0 ? name : fmt::format("{:016X}", title_id);
         LOG_INFO(Frontend, "Loading per application config file for title {}", config_file_name);
         QtConfig per_game_config(config_file_name, QtConfig::ConfigType::PerGameConfig);
+
+        if ((movie_record_on_start || movie_playback_on_start) && !is_artic && title_id != 0 &&
+            UISettings::values.movie_delete_save_data) {
+            DeleteSaveData(title_id);
+        }
     }
 
     // Artic Server cannot accept a client multiple times, so multiple loaders are not
@@ -1609,6 +1626,7 @@ void GMainWindow::BootGame(const QString& filename) {
         game_list_placeholder->hide();
     }
     status_bar_update_timer.start(1000);
+    movie_status_update_timer.start(10);
 
     if (UISettings::values.hide_mouse) {
         mouse_hide_timer.start();
@@ -1704,6 +1722,8 @@ void GMainWindow::ShutdownGame() {
 
     // Disable status bar updates
     status_bar_update_timer.stop();
+    movie_status_update_timer.stop();
+    StopFrameAdvanceHold();
     message_label_used_for_movie = false;
     show_artic_label = false;
     loading_shaders_label->setVisible(false);
@@ -1778,12 +1798,26 @@ void GMainWindow::UpdateSaveStates() {
     if (!system.IsPoweredOn()) {
         ui->menu_Load_State->setEnabled(false);
         ui->menu_Save_State->setEnabled(false);
+        // Disable the slot actions too so that their hotkeys (e.g. number keys) do not swallow
+        // key presses meant for other widgets while no application is running.
+        for (u32 i = 0; i < Core::SaveStateSlotCount; ++i) {
+            actions_load_state[i]->setEnabled(false);
+            actions_save_state[i]->setEnabled(false);
+        }
         return;
     }
 
     ui->menu_Load_State->setEnabled(true);
     ui->menu_Save_State->setEnabled(true);
     ui->action_Load_from_Newest_Slot->setEnabled(false);
+
+    // Slot actions stay enabled while an application is running so that their hotkeys keep
+    // working even for slots that were written after the last refresh. Loading an empty slot is
+    // rejected in OnLoadState.
+    for (u32 i = 0; i < Core::SaveStateSlotCount; ++i) {
+        actions_load_state[i]->setEnabled(true);
+        actions_save_state[i]->setEnabled(true);
+    }
 
     oldest_slot = newest_slot = 1;
     oldest_slot_time = std::numeric_limits<u64>::max();
@@ -1794,8 +1828,8 @@ void GMainWindow::UpdateSaveStates() {
         return;
     }
     auto savestates = Core::ListSaveStates(title_id, movie.GetCurrentMovieID());
+    std::array<bool, Core::SaveStateSlotCount> slot_used{};
     for (u32 i = 0; i < Core::SaveStateSlotCount; ++i) {
-        actions_load_state[i]->setEnabled(false);
         if (i == 0) {
             actions_load_state[i]->setText(tr("Quick Load"));
             actions_save_state[i]->setText(tr("Quick Save"));
@@ -1808,7 +1842,7 @@ void GMainWindow::UpdateSaveStates() {
         if (savestate.slot >= Core::SaveStateSlotCount) {
             continue;
         }
-        actions_load_state[savestate.slot]->setEnabled(true);
+        slot_used[savestate.slot] = true;
         if (savestate.slot == 0) {
             const auto text = QStringLiteral("%2")
                                   .arg(QDateTime::fromSecsSinceEpoch(savestate.time)
@@ -1839,12 +1873,31 @@ void GMainWindow::UpdateSaveStates() {
     }
     // Value as 1 because quicksave slot is not used for this calculation
     for (u32 i = 1; i < Core::SaveStateSlotCount; ++i) {
-        if (!actions_load_state[i]->isEnabled()) {
+        if (!slot_used[i]) {
             // Prefer empty slot
             oldest_slot = i;
             oldest_slot_time = 0;
             break;
         }
+    }
+}
+
+void GMainWindow::DeleteSaveData(u64 program_id) {
+    const std::string sdmc_dir = FileUtil::GetUserPath(FileUtil::UserPath::SDMCDir);
+    std::string save_path =
+        FileSys::ArchiveSource_SDSaveData::GetSaveDataPathFor(sdmc_dir, program_id);
+    if (!save_path.empty() && save_path.back() == '/') {
+        save_path.pop_back();
+    }
+
+    LOG_INFO(Frontend, "Deleting save data of {:016X} at {}", program_id, save_path);
+    if (FileUtil::IsDirectory(save_path) && !FileUtil::DeleteDirRecursively(save_path)) {
+        LOG_ERROR(Frontend, "Failed to delete save data at {}", save_path);
+    }
+    // The metadata file stores the archive format info, remove it so the save is unformatted
+    const std::string metadata_path = save_path + ".metadata";
+    if (FileUtil::Exists(metadata_path)) {
+        FileUtil::Delete(metadata_path);
     }
 }
 
@@ -2950,7 +3003,9 @@ void GMainWindow::OnSaveState() {
     ASSERT(action);
 
     system.SendSignal(Core::System::Signal::Save, action->data().toUInt());
-    system.frame_limiter.AdvanceFrame();
+    if (system.frame_limiter.IsFrameAdvancing()) {
+        system.frame_limiter.AdvanceFrame();
+    }
     newest_slot = action->data().toUInt();
 }
 
@@ -2962,6 +3017,16 @@ void GMainWindow::OnLoadState() {
     QAction* action = qobject_cast<QAction*>(sender());
     ASSERT(action);
 
+    // Slot actions are always enabled while running (for their hotkeys), so ignore empty slots
+    const u32 slot = action->data().toUInt();
+    u64 title_id{};
+    if (system.GetAppLoader().ReadProgramId(title_id) == Loader::ResultStatus::Success) {
+        const auto info = Core::GetSaveStateInfo(title_id, movie.GetCurrentMovieID(), slot);
+        if (info.slot != slot) {
+            return;
+        }
+    }
+
     if (UISettings::values.save_state_warning) {
         QMessageBox::warning(
             this, tr("Savestates"),
@@ -2971,8 +3036,79 @@ void GMainWindow::OnLoadState() {
         config->Save();
     }
 
-    system.SendSignal(Core::System::Signal::Load, action->data().toUInt());
+    system.SendSignal(Core::System::Signal::Load, slot);
+    // Wake up the emu thread so it can process the request while frame advancing. Only do this
+    // while frame advancing, otherwise the pending event would skip a frame once paused.
+    if (system.frame_limiter.IsFrameAdvancing()) {
+        system.frame_limiter.AdvanceFrame();
+    }
+}
+
+void GMainWindow::OnAdvanceFrame() {
+    if (!emulation_running) {
+        return;
+    }
+
+    // Advancing a frame while the emulation is running turns frame advancing on instead
+    if (!system.frame_limiter.IsFrameAdvancing()) {
+        OnPauseGame();
+        return;
+    }
+
     system.frame_limiter.AdvanceFrame();
+
+    // Keep advancing frames for as long as the hotkey is held down
+    frame_advance_hold_elapsed.start();
+    frame_advance_hold_timer.start();
+}
+
+void GMainWindow::OnFrameAdvanceHoldTick() {
+    // Delay before continuous advancing starts, so that tapping the hotkey advances one frame
+    static constexpr qint64 HoldDelayMs = 300;
+
+    if (!emulation_running || !system.frame_limiter.IsFrameAdvancing() ||
+        !IsAdvanceFrameHotkeyHeld()) {
+        StopFrameAdvanceHold();
+        return;
+    }
+    if (frame_advance_hold_elapsed.elapsed() >= HoldDelayMs) {
+        system.frame_limiter.AdvanceFrame();
+    }
+}
+
+void GMainWindow::StopFrameAdvanceHold() {
+    frame_advance_hold_timer.stop();
+}
+
+bool GMainWindow::IsAdvanceFrameHotkeyHeld() {
+    return advance_frame_key_held ||
+           hotkey_registry.IsControllerHotkeyHeld(QStringLiteral("Main Window"),
+                                                  QStringLiteral("Advance Frame"));
+}
+
+bool GMainWindow::eventFilter(QObject* object, QEvent* event) {
+    // Track whether the Advance Frame keyboard hotkey is held down. The key press itself is
+    // consumed by the shortcut system, but the ShortcutOverride event sent beforehand is not.
+    const auto type = event->type();
+    if (type == QEvent::ShortcutOverride || type == QEvent::KeyPress ||
+        type == QEvent::KeyRelease) {
+        const auto* key_event = static_cast<QKeyEvent*>(event);
+        const QKeySequence advance_frame = hotkey_registry.GetKeySequence(
+            QStringLiteral("Main Window"), QStringLiteral("Advance Frame"));
+        if (!key_event->isAutoRepeat() && !advance_frame.isEmpty()) {
+            if (type == QEvent::KeyRelease) {
+                if (key_event->key() == advance_frame[0].key()) {
+                    advance_frame_key_held = false;
+                }
+            } else if (key_event->keyCombination() == advance_frame[0]) {
+                advance_frame_key_held = true;
+            }
+        }
+    } else if (type == QEvent::ApplicationStateChange) {
+        // Key releases are not delivered while the application is inactive
+        advance_frame_key_held = false;
+    }
+    return QMainWindow::eventFilter(object, event);
 }
 
 void GMainWindow::OnConfigure() {
@@ -3598,13 +3734,12 @@ void GMainWindow::OnStopVideoDumping() {
     }
 }
 
-void GMainWindow::UpdateStatusBar() {
+void GMainWindow::UpdateMovieStatus() {
     if (!emu_thread) [[unlikely]] {
-        status_bar_update_timer.stop();
+        movie_status_update_timer.stop();
         return;
     }
 
-    // Update movie status
     const u64 current = movie.GetCurrentInputIndex();
     const u64 total = movie.GetTotalInputCount();
     const auto play_mode = movie.GetPlayMode();
@@ -3625,6 +3760,15 @@ void GMainWindow::UpdateStatusBar() {
         message_label_used_for_movie = false;
         ui->action_Save_Movie->setEnabled(false);
     }
+}
+
+void GMainWindow::UpdateStatusBar() {
+    if (!emu_thread) [[unlikely]] {
+        status_bar_update_timer.stop();
+        return;
+    }
+
+    UpdateMovieStatus();
 
     auto results = system.GetAndResetPerfStats();
 

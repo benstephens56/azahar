@@ -85,6 +85,14 @@ Qt::ShortcutContext HotkeyRegistry::GetShortcutContext(const QString& group,
     return hk.context;
 }
 
+bool HotkeyRegistry::IsControllerHotkeyHeld(const QString& group, const QString& action) {
+    const Hotkey& hk = hotkey_groups[group][action];
+    if (hk.controller_keyseq.isEmpty() || !hk.button_device) {
+        return false;
+    }
+    return hk.button_device->GetStatus() && (!hk.button_device2 || hk.button_device2->GetStatus());
+}
+
 void HotkeyRegistry::SetAction(const QString& group, const QString& action_name, QAction* action) {
     Hotkey& hk = hotkey_groups[group][action_name];
     hk.action = action;

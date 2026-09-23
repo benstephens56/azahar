@@ -51,6 +51,12 @@ void Module::serialize(Archive& ar, const unsigned int file_version) {
     ar & state.hex;
     ar & circle_pad_old_x;
     ar & circle_pad_old_y;
+    if (Archive::is_loading::value) {
+        // The averaging history reflects the host input, not the emulated state. Reset it to the
+        // current stick position so that a stick held while loading a savestate stays held,
+        // instead of being averaged with the position the stick had when the state was saved.
+        ResetCirclePadHistory();
+    }
     // Update events are set in the constructor
     // Devices are set from the implementation (and are stateless afaik)
 }
@@ -114,6 +120,11 @@ DirectionState GetStickDirectionState(s16 circle_pad_x, s16 circle_pad_y) {
     return state;
 }
 
+// xperia64: 0x9A seems to be the calibrated limit of the circle pad
+// Verified by using Input Redirector with very large-value digital inputs
+// on the circle pad and calibrating using the system settings application
+constexpr int MAX_CIRCLEPAD_POS = 0x9A; // Max value for a circle pad position
+
 void Module::LoadInputDevices() {
     LOG_DEBUG(Frontend, "Loading input devices");
     std::transform(Settings::values.current_input_profile.buttons.begin() +
@@ -139,6 +150,17 @@ void Module::LoadInputDevices() {
     } else {
         touch_btn_device.reset();
     }
+}
+
+void Module::ResetCirclePadHistory() {
+    if (!circle_pad) {
+        return;
+    }
+    const auto [x, y] = circle_pad->GetStatus();
+    std::fill(circle_pad_old_x.begin(), circle_pad_old_x.end(),
+              static_cast<s16>(std::roundf(x * MAX_CIRCLEPAD_POS)));
+    std::fill(circle_pad_old_y.begin(), circle_pad_old_y.end(),
+              static_cast<s16>(std::roundf(y * MAX_CIRCLEPAD_POS)));
 }
 
 void Module::UpdatePadCallback(std::uintptr_t user_data, s64 cycles_late) {
@@ -220,11 +242,6 @@ void Module::UpdatePadCallback(std::uintptr_t user_data, s64 cycles_late) {
         // Get current circle pad position and update circle pad direction
         float circle_pad_x_f, circle_pad_y_f;
         std::tie(circle_pad_x_f, circle_pad_y_f) = circle_pad->GetStatus();
-
-        // xperia64: 0x9A seems to be the calibrated limit of the circle pad
-        // Verified by using Input Redirector with very large-value digital inputs
-        // on the circle pad and calibrating using the system settings application
-        constexpr int MAX_CIRCLEPAD_POS = 0x9A; // Max value for a circle pad position
 
         // These are rounded rather than truncated on actual hardware
         s16 circle_pad_new_x = static_cast<s16>(std::roundf(circle_pad_x_f * MAX_CIRCLEPAD_POS));

@@ -140,7 +140,10 @@ void File::Read(Kernel::HLERequestContext& ctx) {
             }
 
             const auto read_delay = static_cast<s64>(backend->GetReadDelayNs(async_data->length));
-            if (!async_data->cache_ready) {
+            // Only compensate for the host read time when timings are not required to be
+            // deterministic, otherwise the emulated read time would depend on the host (and
+            // e.g. movies would desync).
+            if (!async_data->cache_ready && !kernel.UseDeterministicAsyncOperations()) {
                 const auto time_took = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                            std::chrono::steady_clock::now() - async_data->pre_timer)
                                            .count();

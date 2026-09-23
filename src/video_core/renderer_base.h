@@ -73,6 +73,11 @@ public:
     /// Ends the current frame
     void EndFrame();
 
+    /// Presents the current guest framebuffers again without ending the frame (no frame
+    /// limiting, frame counting or perf stats). Used to refresh the screen after the emulated
+    /// state changed outside of normal frame emulation, e.g. after loading a savestate.
+    void RefreshScreen();
+
     f32 GetCurrentFPS() const {
         return current_fps;
     }
@@ -113,6 +118,9 @@ protected:
 protected:
     f32 current_fps = 0.0f; /// Current framerate, should be set by the renderer
     u64 current_frame = 0;  /// Current frame, should be set by the renderer
+
+private:
+    bool refreshing_screen = false; /// Whether SwapBuffers is being called by RefreshScreen
 };
 
 } // namespace VideoCore

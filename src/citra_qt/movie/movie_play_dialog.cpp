@@ -20,11 +20,16 @@ MoviePlayDialog::MoviePlayDialog(QWidget* parent, GameList* game_list_, const Co
       system{system_} {
     ui->setupUi(this);
 
+    ui->deleteSaveDataCheckBox->setChecked(UISettings::values.movie_delete_save_data.GetValue());
+
     ui->buttonBox->button(QDialogButtonBox::Ok)->setEnabled(false);
 
     connect(ui->filePathButton, &QToolButton::clicked, this, &MoviePlayDialog::OnToolButtonClicked);
     connect(ui->filePath, &QLineEdit::editingFinished, this, &MoviePlayDialog::UpdateUIDisplay);
-    connect(ui->buttonBox, &QDialogButtonBox::accepted, this, &MoviePlayDialog::accept);
+    connect(ui->buttonBox, &QDialogButtonBox::accepted, this, [this] {
+        UISettings::values.movie_delete_save_data = ui->deleteSaveDataCheckBox->isChecked();
+        accept();
+    });
     connect(ui->buttonBox, &QDialogButtonBox::rejected, this, &MoviePlayDialog::reject);
 
     if (system.IsPoweredOn()) {

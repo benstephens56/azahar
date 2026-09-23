@@ -88,6 +88,7 @@ struct Values {
 
     Settings::Setting<bool> confirm_before_closing{true, Settings::Keys::confirmClose};
     Settings::Setting<bool> save_state_warning{true, Settings::Keys::saveStateWarning};
+    Settings::Setting<bool> movie_delete_save_data{false, Settings::Keys::movieDeleteSaveData};
     Settings::Setting<bool> first_start{true, Settings::Keys::firstStart};
     Settings::Setting<bool> pause_when_in_background{false, Settings::Keys::pauseWhenInBackground};
     Settings::Setting<bool> mute_when_in_background{false, Settings::Keys::muteWhenInBackground};

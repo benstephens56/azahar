@@ -50,6 +50,16 @@
     </layout>
    </item>
    <item>
+    <widget class="QCheckBox" name="deleteSaveDataCheckBox">
+     <property name="text">
+      <string>Delete application save data before recording</string>
+     </property>
+     <property name="toolTip">
+      <string>Deletes the save data of the application before the movie starts, so it always starts from a clean state. This cannot be undone.</string>
+     </property>
+    </widget>
+   </item>
+   <item>
     <spacer>
      <property name="orientation">
       <enum>Qt::Vertical</enum>

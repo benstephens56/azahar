@@ -177,6 +177,9 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
             status_details = e.what();
             return ResultStatus::ErrorSavestate;
         }
+        // Present the loaded frame right away, otherwise the frame from before loading stays on
+        // screen until the next frame is emulated (e.g. while frame advancing).
+        gpu->Renderer().RefreshScreen();
         frame_limiter.WaitOnce();
         return ResultStatus::Success;
     } else if (save_state_request_status == SaveStateStatus::SAVING && kernel.get() &&

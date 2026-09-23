@@ -303,7 +303,7 @@ public:
     void RunAsync(AsyncFunctor async_section, ResultFunctor result_function,
                   bool really_async = true) {
 
-        if (!Settings::values.deterministic_async_operations && really_async) {
+        if (!kernel.UseDeterministicAsyncOperations() && really_async) {
             kernel.ReportAsyncState(true);
             this->SleepClientThread(
                 "RunAsync", std::chrono::nanoseconds(-1),
@@ -345,7 +345,7 @@ public:
     void RunOnThreadWorker(Common::ThreadWorker& worker, AsyncFunctor async_section,
                            ResultFunctor result_function, bool really_async = true) {
 
-        if (!Settings::values.deterministic_async_operations && really_async) {
+        if (!kernel.UseDeterministicAsyncOperations() && really_async) {
             kernel.ReportAsyncState(true);
 
             // We use packaged_task so we can retrieve a std::future to pass to AsyncWakeUpCallback

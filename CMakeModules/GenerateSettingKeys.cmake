@@ -233,6 +233,7 @@ if (ENABLE_QT)
         "show_advanced_frametime_info"
         "confirmClose"
         "saveStateWarning"
+        "movieDeleteSaveData"
         "firstStart"
         "pauseWhenInBackground"
         "muteWhenInBackground"

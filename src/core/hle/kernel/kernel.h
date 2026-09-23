@@ -398,6 +398,14 @@ public:
         return main_thread_extended_sleep;
     }
 
+    /**
+     * Returns whether async operations must be deterministic, which is the case when enabled in
+     * the settings or while a movie is being recorded or played back. Deterministic async
+     * operations run on the emulator thread and their emulated duration must not depend on how
+     * long the operation took on the host.
+     */
+    bool UseDeterministicAsyncOperations() const;
+
     void ReportAsyncState(bool state) {
         if (state) {
             pending_async_operations++;

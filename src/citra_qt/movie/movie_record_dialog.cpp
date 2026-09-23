@@ -14,12 +14,17 @@ MovieRecordDialog::MovieRecordDialog(QWidget* parent, const Core::System& system
     : QDialog(parent), ui(std::make_unique<Ui::MovieRecordDialog>()), system{system_} {
     ui->setupUi(this);
 
+    ui->deleteSaveDataCheckBox->setChecked(UISettings::values.movie_delete_save_data.GetValue());
+
     ui->buttonBox->button(QDialogButtonBox::Ok)->setEnabled(false);
 
     connect(ui->filePathButton, &QToolButton::clicked, this,
             &MovieRecordDialog::OnToolButtonClicked);
     connect(ui->filePath, &QLineEdit::editingFinished, this, &MovieRecordDialog::UpdateUIDisplay);
-    connect(ui->buttonBox, &QDialogButtonBox::accepted, this, &MovieRecordDialog::accept);
+    connect(ui->buttonBox, &QDialogButtonBox::accepted, this, [this] {
+        UISettings::values.movie_delete_save_data = ui->deleteSaveDataCheckBox->isChecked();
+        accept();
+    });
     connect(ui->buttonBox, &QDialogButtonBox::rejected, this, &MovieRecordDialog::reject);
 
     QString note_text;

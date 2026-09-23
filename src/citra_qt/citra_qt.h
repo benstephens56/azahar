@@ -14,6 +14,7 @@
 #include <QFuture>
 #include <QFutureWatcher>
 #endif
+#include <QElapsedTimer>
 #include <QMainWindow>
 #include <QPushButton>
 #include <QString>
@@ -239,6 +240,8 @@ private slots:
     void OnStopGame();
     void OnSaveState();
     void OnLoadState();
+    void OnAdvanceFrame();
+    void OnFrameAdvanceHoldTick();
     /// Called whenever a user selects a game in the game list widget.
     void OnGameListLoadFile(QString game_path);
     void OnGameListOpenFolder(u64 program_id, GameListOpenTarget target);
@@ -325,6 +328,11 @@ private slots:
 private:
     Q_INVOKABLE void OnMoviePlaybackCompleted();
     void UpdateStatusBar();
+    void UpdateMovieStatus();
+    void StopFrameAdvanceHold();
+    /// Deletes the SD save data of the given application (used before starting a movie)
+    void DeleteSaveData(u64 program_id);
+    bool IsAdvanceFrameHotkeyHeld();
     void UpdateBootHomeMenuState();
     void LoadTranslation();
     void UpdateWindowTitle();
@@ -366,7 +374,13 @@ private:
     QWidget* volume_popup = nullptr;
     QSlider* volume_slider = nullptr;
     QTimer status_bar_update_timer;
+    QTimer movie_status_update_timer;
     bool message_label_used_for_movie = false;
+
+    // Frame advance hotkey hold state
+    QTimer frame_advance_hold_timer;
+    QElapsedTimer frame_advance_hold_elapsed;
+    bool advance_frame_key_held = false;
 
     MultiplayerState* multiplayer_state = nullptr;
 
@@ -473,6 +487,7 @@ protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void showEvent(QShowEvent* event) override;
+    bool eventFilter(QObject* object, QEvent* event) override;
 };
 
 class GApplicationEventFilter : public QObject {

@@ -345,6 +345,8 @@ public:
 
 private:
     void LoadInputDevices();
+    /// Fills the circle pad averaging history with the current host circle pad position
+    void ResetCirclePadHistory();
     void UpdatePadCallback(std::uintptr_t user_data, s64 cycles_late);
     void UpdateAccelerometerCallback(std::uintptr_t user_data, s64 cycles_late);
     void UpdateGyroscopeCallback(std::uintptr_t user_data, s64 cycles_late);

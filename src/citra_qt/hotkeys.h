@@ -89,6 +89,14 @@ public:
     Qt::ShortcutContext GetShortcutContext(const QString& group, const QString& action);
 
     /**
+     * Returns whether the controller button(s) bound to a hotkey are currently held down.
+     *
+     * @param group  General group this hotkey belongs to (e.g. "Main Window", "Debugger").
+     * @param action Name of the action (e.g. "Start Emulation", "Load Image").
+     */
+    bool IsControllerHotkeyHeld(const QString& group, const QString& action);
+
+    /**
      * Stores a QAction into the appropriate hotkey, for triggering by controller
      *
      * @param group General group this shortcut context belongs to
