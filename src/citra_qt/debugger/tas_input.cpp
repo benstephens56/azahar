@@ -205,31 +205,32 @@ TasInputWidget::TasInputWidget(Core::System& system_, QWidget* parent)
     auto* layout = new QVBoxLayout(contents);
     layout->setContentsMargins(4, 4, 4, 4);
 
-    auto* top_row = new QHBoxLayout();
-    top_row->addWidget(CreateButtonsGroup());
     auto* clear_all = new QPushButton(tr("Clear All"), contents);
     clear_all->setToolTip(tr("Clear every input set in this window"));
     connect(clear_all, &QPushButton::clicked, this, &TasInputWidget::ClearAll);
-    top_row->addWidget(clear_all, 0, Qt::AlignTop);
+    layout->addWidget(clear_all);
+
+    // First row: buttons and touch screen
+    auto* top_row = new QHBoxLayout();
+    top_row->addWidget(CreateButtonsGroup());
+    top_row->addWidget(CreateTouchGroup());
     layout->addLayout(top_row);
 
-    auto* sticks_row = new QHBoxLayout();
+    // Second row: sticks and motion (accelerometer above gyroscope)
+    auto* bottom_row = new QHBoxLayout();
     circle_pad_controls.id = Override::StickId::CirclePad;
     c_stick_controls.id = Override::StickId::CStick;
-    sticks_row->addWidget(
+    bottom_row->addWidget(
         CreateStickGroup(tr("Circle Pad"), circle_pad_controls, &Override::State::circle_pad));
-    sticks_row->addWidget(
+    bottom_row->addWidget(
         CreateStickGroup(tr("C-Stick"), c_stick_controls, &Override::State::c_stick));
-    layout->addLayout(sticks_row);
-
-    layout->addWidget(CreateTouchGroup());
-
-    auto* motion_row = new QHBoxLayout();
-    motion_row->addWidget(CreateMotionGroup(tr("Accelerometer"), accel_controls,
-                                            &Override::State::accel, AccelRange));
-    motion_row->addWidget(
+    auto* motion_column = new QVBoxLayout();
+    motion_column->addWidget(CreateMotionGroup(tr("Accelerometer"), accel_controls,
+                                               &Override::State::accel, AccelRange));
+    motion_column->addWidget(
         CreateMotionGroup(tr("Gyroscope"), gyro_controls, &Override::State::gyro, GyroRange));
-    layout->addLayout(motion_row);
+    bottom_row->addLayout(motion_column);
+    layout->addLayout(bottom_row);
 
     auto* note = new QLabel(tr("Bold values are set in this window and take priority over the "
                                "controller. Right click a pad to clear it."),
