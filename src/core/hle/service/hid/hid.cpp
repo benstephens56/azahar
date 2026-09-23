@@ -264,6 +264,12 @@ void Module::UpdatePadCallback(std::uintptr_t user_data, s64 cycles_late) {
         float circle_pad_x_f, circle_pad_y_f;
         std::tie(circle_pad_x_f, circle_pad_y_f) = circle_pad->GetStatus();
 
+        // Limit the circle pad to the maximum output set in the frontend input window
+        const float circle_pad_scale =
+            system.InputOverride().GetStickScale(Core::InputOverride::StickId::CirclePad);
+        circle_pad_x_f *= circle_pad_scale;
+        circle_pad_y_f *= circle_pad_scale;
+
         // These are rounded rather than truncated on actual hardware
         s16 circle_pad_new_x = static_cast<s16>(std::roundf(circle_pad_x_f * MAX_CIRCLEPAD_POS));
         s16 circle_pad_new_y = static_cast<s16>(std::roundf(circle_pad_y_f * MAX_CIRCLEPAD_POS));

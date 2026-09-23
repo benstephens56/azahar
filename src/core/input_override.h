@@ -96,6 +96,25 @@ public:
         return GetState();
     }
 
+    enum class StickId { CirclePad, CStick };
+
+    /**
+     * Sets the maximum output of a stick in percent (0-100). The stick position read from the
+     * input devices is scaled towards the center by this amount, so the stick is bounded by a
+     * smaller circle. Stick positions set in the input window are not scaled (the window bounds
+     * them itself).
+     */
+    void SetMaxOutput(StickId stick, int percent) {
+        max_output[static_cast<int>(stick)] = std::clamp(percent, 0, 100);
+    }
+    int GetMaxOutput(StickId stick) const {
+        return max_output[static_cast<int>(stick)];
+    }
+    /// Factor to multiply the stick position of the input devices with (1.0 by default)
+    float GetStickScale(StickId stick) const {
+        return static_cast<float>(GetMaxOutput(stick)) / 100.0f;
+    }
+
     static constexpr bool IsPressed(const State& state, Button button) {
         return (state.buttons >> button) & 1;
     }
@@ -123,6 +142,8 @@ private:
     mutable std::mutex mutex;
     State state;
     std::atomic<bool> active{false};
+
+    std::array<std::atomic<int>, 2> max_output{100, 100};
 
     std::array<std::atomic<s16>, 3> live_accel{};
     std::array<std::atomic<s16>, 3> live_gyro{};

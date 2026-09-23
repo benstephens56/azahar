@@ -95,6 +95,12 @@ void IR_RST::UpdateCallback(std::uintptr_t user_data, s64 cycles_late) {
         // Get current c-stick position and update c-stick direction
         float c_stick_x_f, c_stick_y_f;
         std::tie(c_stick_x_f, c_stick_y_f) = c_stick->GetStatus();
+
+        // Limit the c-stick to the maximum output set in the frontend input window
+        const float c_stick_scale =
+            system.InputOverride().GetStickScale(Core::InputOverride::StickId::CStick);
+        c_stick_x_f *= c_stick_scale;
+        c_stick_y_f *= c_stick_scale;
         constexpr int MAX_CSTICK_RADIUS = 0x9C; // Max value for a c-stick radius
         c_stick_x = static_cast<s16>(c_stick_x_f * MAX_CSTICK_RADIUS);
         c_stick_y = static_cast<s16>(c_stick_y_f * MAX_CSTICK_RADIUS);

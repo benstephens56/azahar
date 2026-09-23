@@ -39,6 +39,9 @@ public:
     /// Sets the displayed point. `overridden` draws it as set by the user rather than live input.
     void SetPoint(std::optional<std::pair<int, int>> point, bool overridden);
 
+    /// Limits a circle pad to a smaller circle, as a fraction (0 to 1) of the full radius
+    void SetLimit(double fraction);
+
     QSize sizeHint() const override;
 
 signals:
@@ -59,6 +62,7 @@ private:
     bool invert_y;
     std::optional<std::pair<int, int>> point;
     bool overridden = false;
+    double limit = 1.0;
 };
 
 /**
@@ -88,9 +92,11 @@ private:
     using Override = Core::InputOverride;
 
     struct StickControls {
+        Override::StickId id;
         TasInputPad* pad;
         QSpinBox* x;
         QSpinBox* y;
+        QSpinBox* max_output;
     };
 
     struct AxisControls {
@@ -108,6 +114,9 @@ private:
     };
 
     QWidget* CreateButtonsGroup();
+    /// Clamps a stick position to the circle allowed by the stick's maximum output
+    Override::Stick ClampStick(const StickControls& controls, int x, int y) const;
+
     QWidget* CreateStickGroup(const QString& title, StickControls& controls,
                               std::optional<Override::Stick> Override::State::*member);
     QWidget* CreateTouchGroup();

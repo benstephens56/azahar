@@ -263,6 +263,13 @@ void ExtraHID::SendHIDStatus() {
     } else {
         float x, y;
         std::tie(x, y) = c_stick->GetStatus();
+
+        // Limit the c-stick to the maximum output set in the frontend input window
+        auto& input_override_system = Core::System::GetInstance().InputOverride();
+        const float c_stick_scale =
+            input_override_system.GetStickScale(Core::InputOverride::StickId::CStick);
+        x *= c_stick_scale;
+        y *= c_stick_scale;
         bool zl_held = zl->GetStatus();
         bool zr_held = zr->GetStatus();
 

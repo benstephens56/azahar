@@ -77,6 +77,11 @@ TasInputPad::TasInputPad(Shape shape_, int min_x_, int max_x_, int min_y_, int m
     setToolTip(tr("Left click or drag to set, right click to clear"));
 }
 
+void TasInputPad::SetLimit(double fraction) {
+    limit = std::clamp(fraction, 0.0, 1.0);
+    update();
+}
+
 QSize TasInputPad::sizeHint() const {
     return shape == Shape::Circle ? QSize(130, 130)
                                   : QSize(TouchWidth / 2 + 2, TouchHeight / 2 + 2);
@@ -122,6 +127,13 @@ void TasInputPad::paintEvent(QPaintEvent*) {
     painter.setPen(QPen(pal.color(QPalette::Mid), 1, Qt::DashLine));
     painter.drawLine(QPointF(pad.left(), pad.center().y()), QPointF(pad.right(), pad.center().y()));
     painter.drawLine(QPointF(pad.center().x(), pad.top()), QPointF(pad.center().x(), pad.bottom()));
+
+    // Circle the stick is limited to by its maximum output
+    if (shape == Shape::Circle && limit < 1.0) {
+        painter.setPen(QPen(pal.color(QPalette::Highlight), 1, Qt::DashLine));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawEllipse(pad.center(), pad.width() / 2 * limit, pad.height() / 2 * limit);
+    }
 
     if (!point) {
         return;
@@ -169,9 +181,10 @@ void TasInputPad::SetFromMouse(const QPointF& pos) {
         const double dx = fx - 0.5;
         const double dy = fy - 0.5;
         const double length = std::sqrt(dx * dx + dy * dy);
-        if (length > 0.5) {
-            fx = 0.5 + dx / length * 0.5;
-            fy = 0.5 + dy / length * 0.5;
+        const double max_length = 0.5 * limit;
+        if (length > max_length) {
+            fx = 0.5 + (length > 0 ? dx / length * max_length : 0);
+            fy = 0.5 + (length > 0 ? dy / length * max_length : 0);
         }
     }
     fx = std::clamp(fx, 0.0, 1.0);
@@ -201,6 +214,8 @@ TasInputWidget::TasInputWidget(Core::System& system_, QWidget* parent)
     layout->addLayout(top_row);
 
     auto* sticks_row = new QHBoxLayout();
+    circle_pad_controls.id = Override::StickId::CirclePad;
+    c_stick_controls.id = Override::StickId::CStick;
     sticks_row->addWidget(
         CreateStickGroup(tr("Circle Pad"), circle_pad_controls, &Override::State::circle_pad));
     sticks_row->addWidget(
@@ -292,10 +307,33 @@ QWidget* TasInputWidget::CreateStickGroup(const QString& title, StickControls& c
     fields->addWidget(clear);
     layout->addLayout(fields);
 
-    const auto set = [this, member](int x, int y) {
-        overrides.*member = Override::Stick{static_cast<s16>(x), static_cast<s16>(y)};
+    auto* max_output_row = new QHBoxLayout();
+    max_output_row->addWidget(new QLabel(tr("Max Output"), group));
+    controls.max_output = new QSpinBox(group);
+    controls.max_output->setRange(0, 100);
+    controls.max_output->setSuffix(QStringLiteral("%"));
+    controls.max_output->setValue(system.InputOverride().GetMaxOutput(controls.id));
+    controls.max_output->setToolTip(
+        tr("Limits the stick to a smaller circle, for both this window and the controller"));
+    max_output_row->addWidget(controls.max_output);
+    max_output_row->addStretch();
+    layout->addLayout(max_output_row);
+
+    const auto set = [this, member, &controls](int x, int y) {
+        overrides.*member = ClampStick(controls, x, y);
         Apply();
     };
+    connect(controls.max_output, &QSpinBox::valueChanged, this,
+            [this, member, &controls](int value) {
+                system.InputOverride().SetMaxOutput(controls.id, value);
+                controls.pad->SetLimit(value / 100.0);
+                // Keep a position set in the window inside the new limit
+                if (overrides.*member) {
+                    overrides.*member =
+                        ClampStick(controls, (overrides.*member)->x, (overrides.*member)->y);
+                }
+                Apply();
+            });
     connect(controls.pad, &TasInputPad::PointSet, this, set);
     const auto clear_stick = [this, member] {
         (overrides.*member).reset();
@@ -312,6 +350,18 @@ QWidget* TasInputWidget::CreateStickGroup(const QString& title, StickControls& c
     connect(controls.x, &QSpinBox::valueChanged, this, on_spin);
     connect(controls.y, &QSpinBox::valueChanged, this, on_spin);
     return group;
+}
+
+TasInputWidget::Override::Stick TasInputWidget::ClampStick(const StickControls& controls, int x,
+                                                           int y) const {
+    const double max_length = StickRange * controls.max_output->value() / 100.0;
+    const double length = std::sqrt(static_cast<double>(x) * x + static_cast<double>(y) * y);
+    if (length > max_length) {
+        // Scale towards the center and truncate, so the result stays inside the circle
+        x = static_cast<int>(x * max_length / length);
+        y = static_cast<int>(y * max_length / length);
+    }
+    return Override::Stick{static_cast<s16>(x), static_cast<s16>(y)};
 }
 
 QWidget* TasInputWidget::CreateTouchGroup() {
@@ -493,9 +543,11 @@ void TasInputWidget::Refresh() {
             x = set->x;
             y = set->y;
         } else if (device) {
+            // Show the controller position as the game gets it, limited by the max output
             const auto [fx, fy] = device->GetStatus();
-            x = static_cast<int>(std::lround(fx * scale));
-            y = static_cast<int>(std::lround(fy * scale));
+            const float limit = system.InputOverride().GetStickScale(controls.id);
+            x = static_cast<int>(std::lround(fx * limit * scale));
+            y = static_cast<int>(std::lround(fy * limit * scale));
         }
         controls.pad->SetPoint(std::make_pair(x, y), set.has_value());
         SetSpinValue(controls.x, x);
