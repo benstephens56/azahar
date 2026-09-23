@@ -5,6 +5,7 @@
 #include <fmt/ranges.h>
 #include "common/alignment.h"
 #include "common/settings.h"
+#include "core/core.h"
 #include "core/core_timing.h"
 #include "core/hle/service/hid/hid.h"
 #include "core/hle/service/ir/extra_hid.h"
@@ -262,13 +263,28 @@ void ExtraHID::SendHIDStatus() {
     } else {
         float x, y;
         std::tie(x, y) = c_stick->GetStatus();
+        bool zl_held = zl->GetStatus();
+        bool zr_held = zr->GetStatus();
+
+        // Inputs set in the frontend input window take priority over the input devices
+        if (const auto input_override = Core::System::GetInstance().InputOverride().GetActive()) {
+            using Override = Core::InputOverride;
+            zl_held |= Override::IsPressed(*input_override, Override::ZL);
+            zr_held |= Override::IsPressed(*input_override, Override::ZR);
+            if (input_override->c_stick) {
+                // The window uses the IR:RST range (0x9C) for the c-stick
+                constexpr float MAX_CSTICK_RADIUS = 0x9C;
+                x = input_override->c_stick->x / MAX_CSTICK_RADIUS;
+                y = input_override->c_stick->y / MAX_CSTICK_RADIUS;
+            }
+        }
 
         response.c_stick.header.Assign(static_cast<u8>(ResponseID::PollHID));
         response.c_stick.c_stick_x.Assign(static_cast<u32>(C_STICK_CENTER + C_STICK_RADIUS * x));
         response.c_stick.c_stick_y.Assign(static_cast<u32>(C_STICK_CENTER + C_STICK_RADIUS * y));
         response.buttons.battery_level.Assign(0x1F);
-        response.buttons.zl_not_held.Assign(!zl->GetStatus());
-        response.buttons.zr_not_held.Assign(!zr->GetStatus());
+        response.buttons.zl_not_held.Assign(!zl_held);
+        response.buttons.zr_not_held.Assign(!zr_held);
         response.buttons.r_not_held.Assign(1);
         response.unknown = 0;
     }

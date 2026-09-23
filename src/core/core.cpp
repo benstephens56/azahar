@@ -739,6 +739,7 @@ void System::Shutdown(bool is_deserializing) {
     gpu.reset();
     if (!is_deserializing) {
         memory_editor.ClearAll();
+        input_override.Clear();
         lle_modules.clear();
 #ifdef ENABLE_GDBSTUB
         GDBStub::Shutdown();

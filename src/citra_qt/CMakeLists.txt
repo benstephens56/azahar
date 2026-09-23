@@ -127,6 +127,8 @@ add_library(citra_qt STATIC EXCLUDE_FROM_ALL
     debugger/memory_watch.cpp
     debugger/memory_watch.h
     debugger/registers.cpp
+    debugger/tas_input.cpp
+    debugger/tas_input.h
     debugger/registers.h
     debugger/registers.ui
     debugger/wait_tree.cpp

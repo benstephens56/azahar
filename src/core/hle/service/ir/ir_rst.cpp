@@ -99,6 +99,17 @@ void IR_RST::UpdateCallback(std::uintptr_t user_data, s64 cycles_late) {
         c_stick_x = static_cast<s16>(c_stick_x_f * MAX_CSTICK_RADIUS);
         c_stick_y = static_cast<s16>(c_stick_y_f * MAX_CSTICK_RADIUS);
 
+        // Inputs set in the frontend input window take priority over the input devices
+        if (const auto input_override = system.InputOverride().GetActive()) {
+            using Override = Core::InputOverride;
+            state.zl.Assign(state.zl | Override::IsPressed(*input_override, Override::ZL));
+            state.zr.Assign(state.zr | Override::IsPressed(*input_override, Override::ZR));
+            if (input_override->c_stick) {
+                c_stick_x = input_override->c_stick->x;
+                c_stick_y = input_override->c_stick->y;
+            }
+        }
+
         system.Movie().HandleIrRst(state, c_stick_x, c_stick_y);
 
         if (!raw_c_stick) {

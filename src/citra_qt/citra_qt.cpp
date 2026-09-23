@@ -64,6 +64,7 @@
 #include "citra_qt/debugger/memory_search.h"
 #include "citra_qt/debugger/memory_watch.h"
 #include "citra_qt/debugger/registers.h"
+#include "citra_qt/debugger/tas_input.h"
 #include "citra_qt/debugger/wait_tree.h"
 #ifdef ENABLE_DISCORD_RPC
 #include "citra_qt/discord.h"
@@ -754,6 +755,17 @@ void GMainWindow::InitializeDebugWidgets() {
     connect(this, &GMainWindow::EmulationStopping, memorySearchWidget,
             &MemorySearchWidget::OnEmulationStopping);
 
+    tasInputWidget = new TasInputWidget(system, this);
+    addDockWidget(Qt::RightDockWidgetArea, tasInputWidget);
+    tasInputWidget->hide();
+    debug_menu->addAction(tasInputWidget->toggleViewAction());
+    ui->menu_Movie->addSeparator();
+    ui->menu_Movie->addAction(tasInputWidget->toggleViewAction());
+    connect(this, &GMainWindow::EmulationStarting, tasInputWidget,
+            &TasInputWidget::OnEmulationStarting);
+    connect(this, &GMainWindow::EmulationStopping, tasInputWidget,
+            &TasInputWidget::OnEmulationStopping);
+
     if (Pica::g_debug_context) {
         graphicsWidget = new GPUCommandStreamWidget(system, this);
         addDockWidget(Qt::RightDockWidgetArea, graphicsWidget);
@@ -947,6 +959,7 @@ void GMainWindow::InitializeHotkeys() {
     };
 
     connect_shortcut(QStringLiteral("Toggle Screen Layout"), &GMainWindow::ToggleScreenLayout);
+    connect_shortcut(QStringLiteral("Clear TAS Input"), [this] { tasInputWidget->ClearAll(); });
     connect_shortcut(QStringLiteral("Exit Fullscreen"), [&] {
         if (emulation_running) {
             if (secondary_window->isActiveWindow()) {

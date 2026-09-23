@@ -239,6 +239,27 @@ void Module::UpdatePadCallback(std::uintptr_t user_data, s64 cycles_late) {
         state.debug.Assign(buttons[Debug - BUTTON_HID_BEGIN]->GetStatus());
         state.gpio14.Assign(buttons[Gpio14 - BUTTON_HID_BEGIN]->GetStatus());
 
+        // Inputs set in the frontend input window take priority over the input devices
+        const auto input_override = system.InputOverride().GetActive();
+        if (input_override) {
+            using Button = Core::InputOverride::Button;
+            const auto pressed = [&](Button button) {
+                return Core::InputOverride::IsPressed(*input_override, button);
+            };
+            state.a.Assign(state.a | pressed(Button::A));
+            state.b.Assign(state.b | pressed(Button::B));
+            state.x.Assign(state.x | pressed(Button::X));
+            state.y.Assign(state.y | pressed(Button::Y));
+            state.right.Assign(state.right | pressed(Button::Right));
+            state.left.Assign(state.left | pressed(Button::Left));
+            state.up.Assign(state.up | pressed(Button::Up));
+            state.down.Assign(state.down | pressed(Button::Down));
+            state.l.Assign(state.l | pressed(Button::L));
+            state.r.Assign(state.r | pressed(Button::R));
+            state.start.Assign(state.start | pressed(Button::Start));
+            state.select.Assign(state.select | pressed(Button::Select));
+        }
+
         // Get current circle pad position and update circle pad direction
         float circle_pad_x_f, circle_pad_y_f;
         std::tie(circle_pad_x_f, circle_pad_y_f) = circle_pad->GetStatus();
@@ -246,6 +267,10 @@ void Module::UpdatePadCallback(std::uintptr_t user_data, s64 cycles_late) {
         // These are rounded rather than truncated on actual hardware
         s16 circle_pad_new_x = static_cast<s16>(std::roundf(circle_pad_x_f * MAX_CIRCLEPAD_POS));
         s16 circle_pad_new_y = static_cast<s16>(std::roundf(circle_pad_y_f * MAX_CIRCLEPAD_POS));
+        if (input_override && input_override->circle_pad) {
+            circle_pad_new_x = input_override->circle_pad->x;
+            circle_pad_new_y = input_override->circle_pad->y;
+        }
         s16 circle_pad_x = (circle_pad_new_x +
                             std::accumulate(circle_pad_old_x.begin(), circle_pad_old_x.end(), 0)) /
                            CIRCLE_PAD_AVERAGING;
@@ -256,6 +281,12 @@ void Module::UpdatePadCallback(std::uintptr_t user_data, s64 cycles_late) {
         circle_pad_old_x.push_back(circle_pad_new_x);
         circle_pad_old_y.erase(circle_pad_old_y.begin());
         circle_pad_old_y.push_back(circle_pad_new_y);
+
+        // A circle pad position set in the input window is used exactly, without averaging
+        if (input_override && input_override->circle_pad) {
+            circle_pad_x = input_override->circle_pad->x;
+            circle_pad_y = input_override->circle_pad->y;
+        }
 
         system.Movie().HandlePadAndCircleStatus(state, circle_pad_x, circle_pad_y);
 
@@ -309,6 +340,11 @@ void Module::UpdatePadCallback(std::uintptr_t user_data, s64 cycles_late) {
         touch_entry.x = static_cast<u16>(x * Core::kScreenBottomWidth);
         touch_entry.y = static_cast<u16>(y * Core::kScreenBottomHeight);
         touch_entry.valid.Assign(pressed ? 1 : 0);
+        if (input_override && input_override->touch) {
+            touch_entry.x = input_override->touch->x;
+            touch_entry.y = input_override->touch->y;
+            touch_entry.valid.Assign(1);
+        }
 
         system.Movie().HandleTouchStatus(touch_entry);
     }
@@ -365,6 +401,16 @@ void Module::UpdateAccelerometerCallback(std::uintptr_t user_data, s64 cycles_la
         accelerometer_entry.z = static_cast<s16>(accel.z);
     }
 
+    // Accelerometer axes set in the frontend input window take priority over the input devices
+    auto& input_override = system.InputOverride();
+    input_override.SetLiveAccel(accelerometer_entry.x, accelerometer_entry.y,
+                                accelerometer_entry.z);
+    if (const auto overrides = input_override.GetActive()) {
+        accelerometer_entry.x = overrides->accel[0].value_or(accelerometer_entry.x);
+        accelerometer_entry.y = overrides->accel[1].value_or(accelerometer_entry.y);
+        accelerometer_entry.z = overrides->accel[2].value_or(accelerometer_entry.z);
+    }
+
     system.Movie().HandleAccelerometerStatus(accelerometer_entry);
 
     // Make up "raw" entry
@@ -412,6 +458,15 @@ void Module::UpdateGyroscopeCallback(std::uintptr_t user_data, s64 cycles_late) 
         gyroscope_entry.x = static_cast<s16>(gyro.x);
         gyroscope_entry.y = static_cast<s16>(gyro.y);
         gyroscope_entry.z = static_cast<s16>(gyro.z);
+    }
+
+    // Gyroscope axes set in the frontend input window take priority over the input devices
+    auto& input_override = system.InputOverride();
+    input_override.SetLiveGyro(gyroscope_entry.x, gyroscope_entry.y, gyroscope_entry.z);
+    if (const auto overrides = input_override.GetActive()) {
+        gyroscope_entry.x = overrides->gyro[0].value_or(gyroscope_entry.x);
+        gyroscope_entry.y = overrides->gyro[1].value_or(gyroscope_entry.y);
+        gyroscope_entry.z = overrides->gyro[2].value_or(gyroscope_entry.z);
     }
 
     system.Movie().HandleGyroscopeStatus(gyroscope_entry);

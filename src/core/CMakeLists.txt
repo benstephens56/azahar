@@ -482,6 +482,7 @@ add_library(citra_core STATIC EXCLUDE_FROM_ALL
     loader/smdh.h
     memory.cpp
     memory.h
+    input_override.h
     memory_editor.cpp
     memory_editor.h
     movie.cpp

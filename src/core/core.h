@@ -17,6 +17,7 @@
 #include "core/cheats/cheats.h"
 #include "core/hle/service/apt/applet_manager.h"
 #include "core/hle/service/plgldr/plgldr.h"
+#include "core/input_override.h"
 #include "core/memory_editor.h"
 #include "core/movie.h"
 #include "core/perf_stats.h"
@@ -297,6 +298,11 @@ public:
         return memory_editor;
     }
 
+    /// Gets a reference to the inputs set by the frontend input window
+    [[nodiscard]] Core::InputOverride& InputOverride() {
+        return input_override;
+    }
+
     /// Gets a const reference to the movie recorder
     [[nodiscard]] const Core::Movie& Movie() const;
 
@@ -495,6 +501,9 @@ private:
 
     /// Memory edits and freezes requested by frontend memory tools
     Core::MemoryEditor memory_editor;
+
+    /// Inputs set by the frontend input window
+    Core::InputOverride input_override;
 
     /// Video dumper backend
     std::shared_ptr<VideoDumper::Backend> video_dumper;

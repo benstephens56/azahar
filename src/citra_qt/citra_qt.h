@@ -64,6 +64,7 @@ class QSlider;
 class RegistersWidget;
 class MemoryWatchWidget;
 class MemorySearchWidget;
+class TasInputWidget;
 class WaitTreeWidget;
 
 namespace Camera {
@@ -439,6 +440,7 @@ private:
     RegistersWidget* registersWidget{};
     MemoryWatchWidget* memoryWatchWidget{};
     MemorySearchWidget* memorySearchWidget{};
+    TasInputWidget* tasInputWidget{};
     GPUCommandStreamWidget* graphicsWidget{};
     GPUCommandListWidget* graphicsCommandsWidget{};
     GraphicsBreakPointsWidget* graphicsBreakpointsWidget{};
