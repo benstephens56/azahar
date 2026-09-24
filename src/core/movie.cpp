@@ -3,7 +3,9 @@
 // Refer to the license.txt file included.
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -19,11 +21,13 @@
 #include "common/swap.h"
 #include "common/timer.h"
 #include "core/core.h"
+#include "core/core_timing.h"
 #include "core/hle/service/hid/hid.h"
 #include "core/hle/service/ir/extra_hid.h"
 #include "core/hle/service/ir/ir_rst.h"
 #include "core/loader/loader.h"
 #include "core/movie.h"
+#include "video_core/gpu.h"
 
 namespace Core {
 
@@ -144,7 +148,7 @@ static u64 GetInputCount(std::span<const u8> input) {
     return input_count;
 }
 
-Movie::Movie(const Core::System& system_) : system{system_} {}
+Movie::Movie(Core::System& system_) : system{system_} {}
 
 Movie::~Movie() = default;
 
@@ -174,6 +178,13 @@ void Movie::serialize(Archive& ar, const unsigned int file_version) {
         }
     } else {
         ar & id;
+    }
+
+    if (Archive::is_loading::value && tas) {
+        // The replay position within the frame is restored by TasRestoreStatePosition when the
+        // state is from the TAS editor, otherwise start the frame over
+        std::scoped_lock lock{tas_mutex};
+        tas->ResetPosition();
     }
 
     // Whether the state was made in MovieFinished state
@@ -229,7 +240,14 @@ u64 Movie::GetTotalInputCount() const {
 void Movie::CheckInputEnd() {
     if (current_byte + sizeof(ControllerState) > recorded_input.size()) {
         LOG_INFO(Movie, "Playback finished");
-        play_mode = PlayMode::MovieFinished;
+        if (tas) {
+            // The whole movie is now in the TAS editor, continue by recording from here
+            play_mode = PlayMode::Recording;
+            read_only = false;
+            system.frame_limiter.SetUnthrottled(false);
+        } else {
+            play_mode = PlayMode::MovieFinished;
+        }
         playback_completion_callback();
     }
 }
@@ -548,6 +566,14 @@ void Movie::StartPlayback(const std::string& movie_file) {
             id = header.id;
             program_id = header.program_id;
 
+            tas_origin_ticks = system.IsPoweredOn() ? system.CoreTiming().GetTicks() : 0;
+            if (tas) {
+                // Play the whole movie as fast as possible to capture it into the TAS editor
+                std::scoped_lock lock{tas_mutex};
+                tas = std::make_unique<TasData>();
+                system.frame_limiter.SetUnthrottled(true);
+            }
+
             LOG_INFO(Movie, "Loaded Movie, ID: {:016X}", id);
         }
     } else {
@@ -560,6 +586,13 @@ void Movie::StartRecording(const std::string& movie_file, const std::string& aut
     record_movie_file = movie_file;
     record_movie_author = author;
     rerecord_count = 1;
+    tas_origin_ticks = system.IsPoweredOn() ? system.CoreTiming().GetTicks() : 0;
+
+    if (tas) {
+        std::scoped_lock lock{tas_mutex};
+        tas = std::make_unique<TasData>();
+        read_only = false;
+    }
 
     // Generate a random ID
     CryptoPP::AutoSeededRandomPool rng;
@@ -668,6 +701,10 @@ void Movie::Shutdown() {
     }
 
     play_mode = PlayMode::None;
+    if (tas) {
+        std::scoped_lock lock{tas_mutex};
+        tas = std::make_unique<TasData>();
+    }
     recorded_input.resize(0);
     record_movie_file.clear();
     current_byte = 0;
@@ -681,10 +718,32 @@ template <typename... Targs>
 void Movie::Handle(Targs&... Fargs) {
     if (play_mode == PlayMode::Playing) {
         ASSERT(current_byte + sizeof(ControllerState) <= recorded_input.size());
+        const std::size_t position = current_byte;
         Play(Fargs...);
+        if (tas) {
+            // Capture the played back inputs into the TAS editor
+            ControllerState state{};
+            std::memcpy(&state, &recorded_input[position], sizeof(ControllerState));
+            TasResolve(state);
+        }
         CheckInputEnd();
     } else if (play_mode == PlayMode::Recording) {
+        if (!tas) {
+            Record(Fargs...);
+            return;
+        }
+        // Record the live input, let the TAS editor replace it with the input of its table if it
+        // has one for this frame, then apply the result to the input the game gets.
+        const std::size_t position = current_byte;
+        const u64 input = current_input;
         Record(Fargs...);
+        ControllerState state{};
+        std::memcpy(&state, &recorded_input[position], sizeof(ControllerState));
+        state = TasResolve(state);
+        std::memcpy(&recorded_input[position], &state, sizeof(ControllerState));
+        current_byte = position;
+        current_input = input;
+        Play(Fargs...);
     }
 }
 
@@ -712,4 +771,556 @@ void Movie::HandleIrRst(Service::IR::PadState& pad_state, s16& c_stick_x, s16& c
 void Movie::HandleExtraHidResponse(Service::IR::ExtraHIDResponse& extra_hid_response) {
     Handle(extra_hid_response);
 }
+// -------------------------------------------------------------------------------------------------
+// TAS editor
+// -------------------------------------------------------------------------------------------------
+
+namespace {
+
+constexpr std::size_t NumStateTypes = 6;
+constexpr u64 NoFrame = std::numeric_limits<u64>::max();
+
+constexpr u8 TypeBit(ControllerStateType type) {
+    return static_cast<u8>(1u << static_cast<u8>(type));
+}
+
+constexpr u8 AllTypes = (1u << NumStateTypes) - 1;
+
+// Pad bits of ControllerState::pad_and_circle that are shown in the editor (A to Y)
+constexpr u16 EditorButtonMask = 0x0FFF;
+
+constexpr int CStickMax = 0x9C;
+constexpr int ExtraHidCStickCenter = 0x800;
+constexpr int ExtraHidCStickRadius = 0x7FF;
+
+} // namespace
+
+struct Movie::TasData {
+    struct Frame {
+        /// Inputs captured when the frame was emulated, in the order they were read
+        std::vector<ControllerState> polls;
+        /// Values shown in the editor (from the first input of each type, or set by the user)
+        TasFrame values;
+        /// Types (bits) whose inputs are generated from `values` instead of replayed from `polls`
+        u8 edited = 0;
+        /// Types (bits) that have at least one captured input
+        u8 seen = 0;
+        /// False for frames emulated before the editor was enabled
+        bool known = true;
+    };
+
+    /// Replay position within the current frame
+    struct Position {
+        u64 frame = NoFrame;
+        std::array<u32, NumStateTypes> cursors{};
+        bool capturing = false;
+    };
+
+    struct State {
+        std::vector<u8> data;
+        Position position;
+    };
+
+    std::vector<Frame> frames;
+    u64 first_frame = 0;
+    Position position;
+    bool overwrite = false;
+
+    std::map<u64, State> states;
+    u32 state_interval = 60;
+    u32 state_capacity = 60;
+
+    std::optional<u64> seek_request;
+    std::optional<u64> seek_target;
+    std::atomic<u64> current_frame{0};
+
+    void ResetPosition() {
+        position = Position{};
+    }
+};
+
+void Movie::EnableTasEditor(bool enable) {
+    std::scoped_lock lock{tas_mutex};
+    if (!enable) {
+        tas.reset();
+        return;
+    }
+    if (tas) {
+        return;
+    }
+    tas = std::make_unique<TasData>();
+    read_only = false;
+    if (play_mode == PlayMode::Recording || play_mode == PlayMode::Playing) {
+        // Frames emulated before now are not known
+        const u64 frame = TasFrameNow();
+        tas->first_frame = frame;
+        tas->frames.resize(frame);
+        for (auto& f : tas->frames) {
+            f.known = false;
+        }
+    }
+}
+
+bool Movie::IsTasEditorEnabled() const {
+    return tas != nullptr;
+}
+
+u64 Movie::TasFrameNow() const {
+    if (!system.IsPoweredOn()) {
+        return 0;
+    }
+    // Frames are counted from the start of the movie (the core timing base ticks)
+    const s64 origin = base_ticks >= 0 ? base_ticks : tas_origin_ticks;
+    const s64 ticks = system.CoreTiming().GetTicks() - origin;
+    return ticks > 0 ? static_cast<u64>(ticks) / VideoCore::FRAME_TICKS : 0;
+}
+
+ControllerState Movie::TasResolve(const ControllerState& live) {
+    std::scoped_lock lock{tas_mutex};
+    if (!tas) {
+        return live;
+    }
+    auto& data = *tas;
+    const u64 frame_index = TasFrameNow();
+    if (frame_index < data.first_frame) {
+        return live;
+    }
+
+    auto& position = data.position;
+    if (frame_index != position.frame) {
+        // Entering a new frame
+        position.frame = frame_index;
+        position.cursors.fill(0);
+        position.capturing = frame_index >= data.frames.size() || data.overwrite;
+        if (position.capturing) {
+            if (frame_index >= data.frames.size()) {
+                data.frames.resize(frame_index + 1);
+            }
+            data.frames[frame_index] = TasData::Frame{};
+            // The captured frame differs from what later states were made with
+            TasInvalidateStatesFrom(frame_index + 1);
+        }
+    }
+
+    const auto type = live.type;
+    const auto type_index = static_cast<std::size_t>(type);
+    const u32 cursor = type_index < NumStateTypes ? position.cursors[type_index]++ : 0;
+    auto& frame = data.frames[frame_index];
+
+    if (position.capturing) {
+        frame.polls.push_back(live);
+        if (!(frame.seen & TypeBit(type))) {
+            // The first input of each type gives the values shown in the editor
+            auto& v = frame.values;
+            switch (type) {
+            case ControllerStateType::PadAndCircle:
+                v.buttons = live.pad_and_circle.hex & EditorButtonMask;
+                v.circle_x = live.pad_and_circle.circle_pad_x;
+                v.circle_y = live.pad_and_circle.circle_pad_y;
+                break;
+            case ControllerStateType::Touch:
+                v.touch = live.touch.valid != 0;
+                v.touch_x = live.touch.x;
+                v.touch_y = live.touch.y;
+                break;
+            case ControllerStateType::Accelerometer:
+                v.accel = {live.accelerometer.x, live.accelerometer.y, live.accelerometer.z};
+                break;
+            case ControllerStateType::Gyroscope:
+                v.gyro = {live.gyroscope.x, live.gyroscope.y, live.gyroscope.z};
+                break;
+            case ControllerStateType::IrRst:
+                v.zl = live.ir_rst.zl != 0;
+                v.zr = live.ir_rst.zr != 0;
+                v.c_stick_x = live.ir_rst.x;
+                v.c_stick_y = live.ir_rst.y;
+                break;
+            case ControllerStateType::ExtraHidResponse:
+                if (!(frame.seen & TypeBit(ControllerStateType::IrRst))) {
+                    v.zl = !live.extra_hid_response.zl_not_held;
+                    v.zr = !live.extra_hid_response.zr_not_held;
+                    v.c_stick_x =
+                        static_cast<s16>((static_cast<int>(live.extra_hid_response.c_stick_x) -
+                                          ExtraHidCStickCenter) *
+                                         CStickMax / ExtraHidCStickRadius);
+                    v.c_stick_y =
+                        static_cast<s16>((static_cast<int>(live.extra_hid_response.c_stick_y) -
+                                          ExtraHidCStickCenter) *
+                                         CStickMax / ExtraHidCStickRadius);
+                }
+                break;
+            }
+            frame.seen |= TypeBit(type);
+        }
+        return live;
+    }
+
+    // Replay the exact captured input of the frame, unless the frame was edited
+    if (!(frame.edited & TypeBit(type))) {
+        u32 count = 0;
+        const ControllerState* last = nullptr;
+        for (const auto& poll : frame.polls) {
+            if (poll.type != type) {
+                continue;
+            }
+            if (count++ == cursor) {
+                return poll;
+            }
+            last = &poll;
+        }
+        if (last) {
+            return *last;
+        }
+    }
+
+    // Generate the input from the values of the frame
+    const auto& v = frame.values;
+    ControllerState state{};
+    state.type = type;
+    switch (type) {
+    case ControllerStateType::PadAndCircle:
+        // Keep the bits not shown in the editor (debug, gpio14) from the live input
+        state.pad_and_circle.hex = static_cast<u16>((live.pad_and_circle.hex & ~EditorButtonMask) |
+                                                    (v.buttons & EditorButtonMask));
+        state.pad_and_circle.circle_pad_x = v.circle_x;
+        state.pad_and_circle.circle_pad_y = v.circle_y;
+        break;
+    case ControllerStateType::Touch:
+        state.touch.x = v.touch_x;
+        state.touch.y = v.touch_y;
+        state.touch.valid = v.touch ? 1 : 0;
+        break;
+    case ControllerStateType::Accelerometer:
+        state.accelerometer.x = v.accel[0];
+        state.accelerometer.y = v.accel[1];
+        state.accelerometer.z = v.accel[2];
+        break;
+    case ControllerStateType::Gyroscope:
+        state.gyroscope.x = v.gyro[0];
+        state.gyroscope.y = v.gyro[1];
+        state.gyroscope.z = v.gyro[2];
+        break;
+    case ControllerStateType::IrRst:
+        state.ir_rst.x = v.c_stick_x;
+        state.ir_rst.y = v.c_stick_y;
+        state.ir_rst.zl = v.zl ? 1 : 0;
+        state.ir_rst.zr = v.zr ? 1 : 0;
+        break;
+    case ControllerStateType::ExtraHidResponse: {
+        state.extra_hid_response.hex = live.extra_hid_response.hex;
+        state.extra_hid_response.zl_not_held.Assign(v.zl ? 0 : 1);
+        state.extra_hid_response.zr_not_held.Assign(v.zr ? 0 : 1);
+        const auto to_extra_hid = [](s16 value) {
+            return static_cast<u32>(std::clamp(
+                ExtraHidCStickCenter + value * ExtraHidCStickRadius / CStickMax, 0, 0xFFF));
+        };
+        state.extra_hid_response.c_stick_x.Assign(to_extra_hid(v.c_stick_x));
+        state.extra_hid_response.c_stick_y.Assign(to_extra_hid(v.c_stick_y));
+        break;
+    }
+    }
+    return state;
+}
+
+void Movie::TasInvalidateStatesFrom(std::size_t frame) {
+    // A state taken at the start of a frame is still valid if no input of the frame was read
+    // before it was taken
+    auto& states = tas->states;
+    for (auto it = states.lower_bound(frame == 0 ? 0 : frame - 1); it != states.end();) {
+        const bool before = it->first < frame;
+        const bool clean =
+            std::all_of(it->second.position.cursors.begin(), it->second.position.cursors.end(),
+                        [](u32 c) { return c == 0; });
+        if (before || (it->first == frame && clean)) {
+            ++it;
+        } else {
+            it = states.erase(it);
+        }
+    }
+}
+
+std::size_t Movie::TasFrameCount() const {
+    std::scoped_lock lock{tas_mutex};
+    return tas ? tas->frames.size() : 0;
+}
+
+u64 Movie::TasFirstFrame() const {
+    std::scoped_lock lock{tas_mutex};
+    return tas ? tas->first_frame : 0;
+}
+
+Movie::TasFrame Movie::TasGetFrame(std::size_t index) const {
+    std::scoped_lock lock{tas_mutex};
+    if (!tas || index >= tas->frames.size()) {
+        return {};
+    }
+    return tas->frames[index].values;
+}
+
+std::vector<Movie::TasFrame> Movie::TasGetFrames(std::size_t index, std::size_t count) const {
+    std::scoped_lock lock{tas_mutex};
+    std::vector<TasFrame> result;
+    if (!tas) {
+        return result;
+    }
+    for (std::size_t i = index; i < index + count && i < tas->frames.size(); ++i) {
+        result.push_back(tas->frames[i].values);
+    }
+    return result;
+}
+
+bool Movie::TasIsFrameEdited(std::size_t index) const {
+    std::scoped_lock lock{tas_mutex};
+    return tas && index < tas->frames.size() && tas->frames[index].edited != 0;
+}
+
+bool Movie::TasIsFrameKnown(std::size_t index) const {
+    std::scoped_lock lock{tas_mutex};
+    return tas && index < tas->frames.size() && tas->frames[index].known;
+}
+
+void Movie::TasSetFrame(std::size_t index, const TasFrame& values) {
+    std::scoped_lock lock{tas_mutex};
+    if (!tas || index < tas->first_frame) {
+        return;
+    }
+    if (index >= tas->frames.size()) {
+        tas->frames.resize(index + 1);
+    }
+    auto& frame = tas->frames[index];
+    const auto& old = frame.values;
+    u8 changed = 0;
+    if (values.buttons != old.buttons || values.circle_x != old.circle_x ||
+        values.circle_y != old.circle_y) {
+        changed |= TypeBit(ControllerStateType::PadAndCircle);
+    }
+    if (values.touch != old.touch || values.touch_x != old.touch_x ||
+        values.touch_y != old.touch_y) {
+        changed |= TypeBit(ControllerStateType::Touch);
+    }
+    if (values.accel != old.accel) {
+        changed |= TypeBit(ControllerStateType::Accelerometer);
+    }
+    if (values.gyro != old.gyro) {
+        changed |= TypeBit(ControllerStateType::Gyroscope);
+    }
+    if (values.zl != old.zl || values.zr != old.zr || values.c_stick_x != old.c_stick_x ||
+        values.c_stick_y != old.c_stick_y) {
+        changed |=
+            TypeBit(ControllerStateType::IrRst) | TypeBit(ControllerStateType::ExtraHidResponse);
+    }
+    if (!changed) {
+        return;
+    }
+    frame.values = values;
+    frame.edited |= changed;
+    frame.known = true;
+    TasInvalidateStatesFrom(index);
+}
+
+void Movie::TasInsertFrames(std::size_t index, const std::vector<TasFrame>& values) {
+    std::scoped_lock lock{tas_mutex};
+    if (!tas || index < tas->first_frame || values.empty()) {
+        return;
+    }
+    index = std::min(index, tas->frames.size());
+    std::vector<TasData::Frame> frames(values.size());
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        frames[i].values = values[i];
+        frames[i].edited = AllTypes;
+    }
+    tas->frames.insert(tas->frames.begin() + index, frames.begin(), frames.end());
+    TasInvalidateStatesFrom(index);
+}
+
+void Movie::TasDeleteFrames(std::size_t index, std::size_t count) {
+    std::scoped_lock lock{tas_mutex};
+    if (!tas || index < tas->first_frame || index >= tas->frames.size()) {
+        return;
+    }
+    count = std::min(count, tas->frames.size() - index);
+    tas->frames.erase(tas->frames.begin() + index, tas->frames.begin() + index + count);
+    TasInvalidateStatesFrom(index);
+}
+
+u64 Movie::TasCurrentFrame() const {
+    std::scoped_lock lock{tas_mutex};
+    return tas ? tas->current_frame.load() : 0;
+}
+
+bool Movie::TasHasState(u64 frame) const {
+    std::scoped_lock lock{tas_mutex};
+    return tas && tas->states.contains(frame);
+}
+
+std::size_t Movie::TasStateCount() const {
+    std::scoped_lock lock{tas_mutex};
+    return tas ? tas->states.size() : 0;
+}
+
+std::size_t Movie::TasStateMemoryUsage() const {
+    std::scoped_lock lock{tas_mutex};
+    std::size_t total = 0;
+    if (tas) {
+        for (const auto& [frame, state] : tas->states) {
+            total += state.data.size();
+        }
+    }
+    return total;
+}
+
+void Movie::TasSetStateInterval(u32 frames) {
+    std::scoped_lock lock{tas_mutex};
+    if (tas) {
+        tas->state_interval = std::max(frames, 1u);
+    }
+}
+
+void Movie::TasSetStateCapacity(u32 states) {
+    std::scoped_lock lock{tas_mutex};
+    if (tas) {
+        tas->state_capacity = std::max(states, 2u);
+    }
+}
+
+void Movie::TasRequestSeek(u64 frame) {
+    std::scoped_lock lock{tas_mutex};
+    if (tas && play_mode == PlayMode::Recording) {
+        tas->seek_request = std::max(frame, tas->first_frame);
+    }
+}
+
+bool Movie::TasIsSeeking() const {
+    std::scoped_lock lock{tas_mutex};
+    return tas && (tas->seek_request || tas->seek_target);
+}
+
+void Movie::TasSetOverwrite(bool overwrite) {
+    std::scoped_lock lock{tas_mutex};
+    if (tas) {
+        tas->overwrite = overwrite;
+    }
+}
+
+std::optional<u64> Movie::TasTakeSeekRequest() {
+    std::scoped_lock lock{tas_mutex};
+    if (!tas) {
+        return std::nullopt;
+    }
+    auto request = tas->seek_request;
+    tas->seek_request.reset();
+    return request;
+}
+
+std::optional<Movie::TasStateRef> Movie::TasFindState(u64 frame) const {
+    std::scoped_lock lock{tas_mutex};
+    if (!tas) {
+        return std::nullopt;
+    }
+    auto it = tas->states.upper_bound(frame);
+    if (it == tas->states.begin()) {
+        return std::nullopt;
+    }
+    --it;
+    return TasStateRef{it->first, it->second.data};
+}
+
+void Movie::TasRestoreStatePosition(u64 frame) {
+    std::scoped_lock lock{tas_mutex};
+    if (!tas) {
+        return;
+    }
+    if (const auto it = tas->states.find(frame); it != tas->states.end()) {
+        auto& position = tas->position;
+        position = it->second.position;
+        if (position.capturing && position.frame < tas->frames.size()) {
+            if (position.frame + 1 < tas->frames.size()) {
+                // The frame was fully captured after this state was taken, replay it
+                position.capturing = false;
+            } else {
+                // Continue capturing the frame after the inputs read before the state
+                auto& captured = tas->frames[position.frame];
+                u32 consumed = 0;
+                for (const u32 cursor : position.cursors) {
+                    consumed += cursor;
+                }
+                if (consumed < captured.polls.size()) {
+                    captured.polls.erase(captured.polls.begin() + consumed, captured.polls.end());
+                }
+                captured.seen = 0;
+                for (const auto& poll : captured.polls) {
+                    captured.seen |= TypeBit(poll.type);
+                }
+            }
+        }
+    }
+    tas->current_frame = frame;
+}
+
+bool Movie::TasWantsState() const {
+    std::scoped_lock lock{tas_mutex};
+    // States are also kept while a movie is captured by playing it back, so that its frames can be
+    // gone back to once it is edited
+    if (!tas || (play_mode != PlayMode::Recording && play_mode != PlayMode::Playing)) {
+        return false;
+    }
+    const u64 frame = TasFrameNow();
+    return frame >= tas->first_frame && frame % tas->state_interval == 0 &&
+           !tas->states.contains(frame);
+}
+
+void Movie::TasStoreState(std::vector<u8> state) {
+    std::scoped_lock lock{tas_mutex};
+    if (!tas) {
+        return;
+    }
+    const u64 frame = TasFrameNow();
+    auto& position = tas->position;
+    TasData::Position saved = position;
+    if (saved.frame != frame) {
+        // No input of this frame was read yet
+        saved = TasData::Position{};
+    }
+    tas->states[frame] = TasData::State{std::move(state), saved};
+
+    // Over capacity: drop the state whose removal leaves the smallest gap, keeping the first
+    auto& states = tas->states;
+    while (states.size() > tas->state_capacity && states.size() > 2) {
+        auto best = states.end();
+        u64 best_gap = std::numeric_limits<u64>::max();
+        for (auto it = std::next(states.begin()); std::next(it) != states.end(); ++it) {
+            const u64 gap = std::next(it)->first - std::prev(it)->first;
+            if (gap < best_gap) {
+                best_gap = gap;
+                best = it;
+            }
+        }
+        if (best == states.end()) {
+            break;
+        }
+        states.erase(best);
+    }
+}
+
+void Movie::TasSetSeekTarget(std::optional<u64> frame) {
+    std::scoped_lock lock{tas_mutex};
+    if (tas) {
+        tas->seek_target = frame;
+    }
+}
+
+bool Movie::TasOnVBlank() {
+    std::scoped_lock lock{tas_mutex};
+    if (!tas) {
+        return false;
+    }
+    const u64 frame = TasFrameNow();
+    tas->current_frame = frame;
+    if (tas->seek_target && frame >= *tas->seek_target) {
+        tas->seek_target.reset();
+        return true;
+    }
+    return false;
+}
+
 } // namespace Core

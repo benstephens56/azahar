@@ -65,6 +65,7 @@ class RegistersWidget;
 class MemoryWatchWidget;
 class MemorySearchWidget;
 class TasInputWidget;
+class TasEditorWidget;
 class WaitTreeWidget;
 
 namespace Camera {
@@ -441,6 +442,7 @@ private:
     MemoryWatchWidget* memoryWatchWidget{};
     MemorySearchWidget* memorySearchWidget{};
     TasInputWidget* tasInputWidget{};
+    TasEditorWidget* tasEditorWidget{};
     GPUCommandStreamWidget* graphicsWidget{};
     GPUCommandListWidget* graphicsCommandsWidget{};
     GraphicsBreakPointsWidget* graphicsBreakpointsWidget{};

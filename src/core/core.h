@@ -8,6 +8,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <boost/optional.hpp>
 #include <boost/serialization/version.hpp>
@@ -127,6 +128,10 @@ public:
      * @return Result status, indicating whethor or not the operation succeeded.
      */
     [[nodiscard]] ResultStatus RunLoop(bool tight_loop = true);
+
+    /// Handles seeking and savestates of the TAS editor. Returns a result if RunLoop should
+    /// return right away.
+    std::optional<ResultStatus> TasUpdate();
 
     /**
      * Step the CPU one instruction

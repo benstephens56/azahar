@@ -64,6 +64,7 @@
 #include "citra_qt/debugger/memory_search.h"
 #include "citra_qt/debugger/memory_watch.h"
 #include "citra_qt/debugger/registers.h"
+#include "citra_qt/debugger/tas_editor.h"
 #include "citra_qt/debugger/tas_input.h"
 #include "citra_qt/debugger/wait_tree.h"
 #ifdef ENABLE_DISCORD_RPC
@@ -765,6 +766,16 @@ void GMainWindow::InitializeDebugWidgets() {
             &TasInputWidget::OnEmulationStarting);
     connect(this, &GMainWindow::EmulationStopping, tasInputWidget,
             &TasInputWidget::OnEmulationStopping);
+
+    tasEditorWidget = new TasEditorWidget(system, this);
+    addDockWidget(Qt::BottomDockWidgetArea, tasEditorWidget);
+    tasEditorWidget->hide();
+    debug_menu->addAction(tasEditorWidget->toggleViewAction());
+    ui->menu_Movie->addAction(tasEditorWidget->toggleViewAction());
+    connect(this, &GMainWindow::EmulationStarting, tasEditorWidget,
+            &TasEditorWidget::OnEmulationStarting);
+    connect(this, &GMainWindow::EmulationStopping, tasEditorWidget,
+            &TasEditorWidget::OnEmulationStopping);
 
     if (Pica::g_debug_context) {
         graphicsWidget = new GPUCommandStreamWidget(system, this);

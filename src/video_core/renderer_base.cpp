@@ -51,6 +51,12 @@ void RendererBase::EndFrame() {
 
     render_window.PollEvents();
 
+    // Pause when the TAS editor reached the frame it was seeking to
+    if (system.Movie().IsTasEditorEnabled() && system.Movie().TasOnVBlank()) {
+        system.frame_limiter.SetUnthrottled(false);
+        system.frame_limiter.SetFrameAdvancing(true);
+    }
+
     system.frame_limiter.DoFrameLimiting(system.CoreTiming().GetGlobalTimeUs());
     system.perf_stats->BeginSystemFrame();
 }

@@ -204,6 +204,14 @@ public:
     /// Wakes the emulator thread to run the paused work callback, without advancing a frame.
     void RequestPausedWork();
 
+    /// While set, emulation runs as fast as possible (used when seeking in the TAS editor)
+    void SetUnthrottled(bool value) {
+        unthrottled = value;
+    }
+    bool IsUnthrottled() const {
+        return unthrottled;
+    }
+
 private:
     /// Emulated system time (in microseconds) at the last limiter invocation
     std::chrono::microseconds previous_system_time_us{0};
@@ -224,6 +232,7 @@ private:
     void WaitForAdvance();
 
     std::atomic_bool advance_requested{false};
+    std::atomic_bool unthrottled{false};
     std::atomic_bool paused_work_requested{false};
     std::function<void()> paused_work_callback;
 };

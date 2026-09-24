@@ -4,7 +4,12 @@
 
 #pragma once
 
+#include <array>
 #include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <span>
 #include <boost/serialization/vector.hpp>
 #include "common/common_types.h"
@@ -44,7 +49,7 @@ public:
         Invalid,
     };
 
-    explicit Movie(const Core::System& system);
+    explicit Movie(Core::System& system);
     ~Movie();
 
     void SetPlaybackCompletionCallback(std::function<void()> completion_callback);
@@ -139,6 +144,94 @@ public:
      */
     void SaveMovie();
 
+    /// Sets the file the movie is saved to
+    void SetMovieFile(const std::string& movie_file) {
+        record_movie_file = movie_file;
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // TAS editor (TAStudio-like piano roll)
+    //
+    // While enabled, the inputs of the movie are also kept per frame (a frame being one vblank
+    // period of emulated time). While recording, frames that are already in the table are replayed
+    // from it (edited values, or the exact inputs captured when the frame was first emulated), and
+    // frames past its end are captured from the live input. Everything that reaches the game is
+    // still recorded into the movie as usual, so saved movies play back on any build.
+    //
+    // Savestates of the emulator ("greenzone") are kept in memory every few frames, so that the
+    // emulator can go back to any earlier frame by loading the closest state and emulating forward.
+    // ---------------------------------------------------------------------------------------------
+
+    /// Inputs of one frame as shown and edited in the TAS editor
+    struct TasFrame {
+        /// Pad buttons, using the bits of the movie file: 0 A, 1 B, 2 Select, 3 Start, 4 Right,
+        /// 5 Left, 6 Up, 7 Down, 8 R, 9 L, 10 X, 11 Y
+        u16 buttons = 0;
+        s16 circle_x = 0;
+        s16 circle_y = 0;
+        bool touch = false;
+        u16 touch_x = 0;
+        u16 touch_y = 0;
+        bool zl = false;
+        bool zr = false;
+        /// C-stick in IR:RST units (-0x9C to 0x9C)
+        s16 c_stick_x = 0;
+        s16 c_stick_y = 0;
+        std::array<s16, 3> accel{};
+        std::array<s16, 3> gyro{};
+
+        bool operator==(const TasFrame&) const = default;
+    };
+
+    void EnableTasEditor(bool enable);
+    bool IsTasEditorEnabled() const;
+
+    /// Number of frames in the table
+    std::size_t TasFrameCount() const;
+    /// Frames before this one were emulated before the TAS editor was enabled and are not known
+    u64 TasFirstFrame() const;
+    TasFrame TasGetFrame(std::size_t index) const;
+    std::vector<TasFrame> TasGetFrames(std::size_t index, std::size_t count) const;
+    /// Whether a frame has values set in the editor (instead of the exact captured inputs)
+    bool TasIsFrameEdited(std::size_t index) const;
+    /// Whether the frame has been emulated and captured, or was created in the editor
+    bool TasIsFrameKnown(std::size_t index) const;
+    void TasSetFrame(std::size_t index, const TasFrame& frame);
+    void TasInsertFrames(std::size_t index, const std::vector<TasFrame>& frames);
+    void TasDeleteFrames(std::size_t index, std::size_t count);
+
+    /// Frame the emulator is at, i.e. the next frame to be emulated
+    u64 TasCurrentFrame() const;
+    /// Whether a savestate of the given frame is kept
+    bool TasHasState(u64 frame) const;
+    std::size_t TasStateCount() const;
+    std::size_t TasStateMemoryUsage() const;
+    void TasSetStateInterval(u32 frames);
+    void TasSetStateCapacity(u32 states);
+    /// Asks the emulator to go to the given frame, loading a savestate if needed. The emulator
+    /// pauses (frame advancing) once it reaches the frame.
+    void TasRequestSeek(u64 frame);
+    bool TasIsSeeking() const;
+    /// While set, frames in the table are recorded from the live input instead of replayed
+    void TasSetOverwrite(bool overwrite);
+
+    // Used by the core (emulator thread)
+    std::optional<u64> TasTakeSeekRequest();
+    /// Returns the closest savestate at or before the frame
+    struct TasStateRef {
+        u64 frame;
+        std::vector<u8> state;
+    };
+    std::optional<TasStateRef> TasFindState(u64 frame) const;
+    /// Restores the replay position that was current when the state of the frame was taken
+    void TasRestoreStatePosition(u64 frame);
+    bool TasWantsState() const;
+    void TasStoreState(std::vector<u8> state);
+    void TasSetSeekTarget(std::optional<u64> frame);
+    /// Called at every vblank. Returns true if a seek reached its target.
+    bool TasOnVBlank();
+    u64 TasFrameNow() const;
+
 private:
     void CheckInputEnd();
 
@@ -165,7 +258,16 @@ private:
     ValidationResult ValidateInput(std::span<const u8> input, u64 expected_count) const;
 
 private:
-    const Core::System& system;
+    struct TasData;
+    ControllerState TasResolve(const ControllerState& live);
+    void TasInvalidateStatesFrom(std::size_t frame);
+
+    std::unique_ptr<TasData> tas;
+    /// Ticks at the start of the movie, used when the movie has no base ticks
+    s64 tas_origin_ticks = 0;
+    mutable std::mutex tas_mutex;
+
+    Core::System& system;
     PlayMode play_mode;
 
     std::string record_movie_file;

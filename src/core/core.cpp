@@ -109,6 +109,12 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
     // Apply memory edits/freezes from frontend tools. Does nothing unless the user requested any.
     memory_editor.Apply();
 
+    if (movie.IsTasEditorEnabled()) {
+        if (const auto result = TasUpdate()) {
+            return *result;
+        }
+    }
+
     Signal signal{Signal::None};
     u32 param{};
     {
@@ -299,6 +305,57 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
     }
 
     return status;
+}
+
+std::optional<System::ResultStatus> System::TasUpdate() {
+    // Loading and saving states needs all async operations to be done, retry later otherwise
+    if (kernel->AreAsyncOperationsPending()) {
+        return std::nullopt;
+    }
+
+    if (const auto target = movie.TasTakeSeekRequest()) {
+        const u64 frame = movie.TasFrameNow();
+        const auto state = movie.TasFindState(*target);
+        const bool need_load = state && (*target < frame || state->frame > frame);
+        if (*target < frame && !state) {
+            LOG_WARNING(Core, "TAS editor: no savestate to go back to frame {}", *target);
+            frame_limiter.SetFrameAdvancing(true);
+            return std::nullopt;
+        }
+        if (need_load) {
+            try {
+                if (!LoadStateBuffer(state->state)) {
+                    frame_limiter.SetFrameAdvancing(true);
+                    return std::nullopt;
+                }
+            } catch (const std::exception& e) {
+                LOG_ERROR(Core, "TAS editor: error loading state: {}", e.what());
+                status_details = e.what();
+                return ResultStatus::ErrorSavestate;
+            }
+            movie.TasRestoreStatePosition(state->frame);
+        }
+        if (need_load && state->frame == *target) {
+            // Already at the target, stay paused here
+            frame_limiter.SetUnthrottled(false);
+            frame_limiter.SetFrameAdvancing(true);
+            gpu->Renderer().RefreshScreen();
+            frame_limiter.WaitOnce();
+            return ResultStatus::Success;
+        }
+        // Emulate as fast as possible until the target frame (see RendererBase::EndFrame)
+        movie.TasSetSeekTarget(*target);
+        frame_limiter.SetUnthrottled(true);
+        frame_limiter.SetFrameAdvancing(false);
+        if (need_load) {
+            return ResultStatus::Success;
+        }
+    }
+
+    if (movie.TasWantsState()) {
+        movie.TasStoreState(SaveStateBuffer());
+    }
+    return std::nullopt;
 }
 
 bool System::SendSignal(System::Signal signal, u32 param) {

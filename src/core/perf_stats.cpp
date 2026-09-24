@@ -236,7 +236,10 @@ void FrameLimiter::DoFrameLimiting(microseconds current_system_time_us) {
     auto now = Clock::now();
     double sleep_scale = Settings::GetFrameLimit() / 100.0;
 
-    if (Settings::GetFrameLimit() == 0) {
+    if (Settings::GetFrameLimit() == 0 || unthrottled) {
+        previous_system_time_us = current_system_time_us;
+        previous_walltime = now;
+        frame_limiting_delta_err = std::chrono::microseconds::zero();
         return;
     }
 
