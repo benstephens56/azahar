@@ -7,9 +7,13 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QDateTime>
 #include <QFileDialog>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMenu>
@@ -79,30 +83,75 @@ std::vector<int> ParseNumbers(const QString& text) {
     return numbers;
 }
 
-/// Text form of frames for the system clipboard, one frame per line
-QString FramesToText(const std::vector<TasFrame>& frames) {
-    QStringList lines;
+// Frames are put on the system clipboard as JSON in the format used by CTM Studio, so they can be
+// copied and pasted between the two:
+//   {"format": "ctm-frames", "version": 1, "frames": [{"buttons": 0, "cx": 0, "cy": 0, ...}]}
+// "buttons" uses the bits of the movie file (see Core::Movie::TasFrame). CTM Studio does not
+// know about the C-stick, ZL and ZR, which are added as "csx", "csy", "zl" and "zr".
+const QString ClipboardFormat = QStringLiteral("ctm-frames");
+
+QString FramesToJson(const std::vector<TasFrame>& frames) {
+    QJsonArray array;
     for (const auto& f : frames) {
-        QString buttons;
-        for (const auto& button : ButtonColumns) {
-            if (TasEditorModel::GetButton(f, button.column)) {
-                buttons += QString::fromUtf8(button.name);
-            } else {
-                buttons += QStringLiteral(".");
-            }
-        }
-        lines << QStringLiteral("%1|%2,%3|%4,%5|%6|%7|%8")
-                     .arg(buttons)
-                     .arg(f.circle_x)
-                     .arg(f.circle_y)
-                     .arg(f.c_stick_x)
-                     .arg(f.c_stick_y)
-                     .arg(f.touch ? QStringLiteral("%1,%2").arg(f.touch_x).arg(f.touch_y)
-                                  : QString{})
-                     .arg(FormatVector(f.accel))
-                     .arg(FormatVector(f.gyro));
+        array.append(QJsonObject{
+            {QStringLiteral("buttons"), f.buttons},
+            {QStringLiteral("cx"), f.circle_x},
+            {QStringLiteral("cy"), f.circle_y},
+            {QStringLiteral("tx"), f.touch_x},
+            {QStringLiteral("ty"), f.touch_y},
+            {QStringLiteral("tvalid"), f.touch ? 1 : 0},
+            {QStringLiteral("ax"), f.accel[0]},
+            {QStringLiteral("ay"), f.accel[1]},
+            {QStringLiteral("az"), f.accel[2]},
+            {QStringLiteral("gx"), f.gyro[0]},
+            {QStringLiteral("gy"), f.gyro[1]},
+            {QStringLiteral("gz"), f.gyro[2]},
+            {QStringLiteral("zl"), f.zl ? 1 : 0},
+            {QStringLiteral("zr"), f.zr ? 1 : 0},
+            {QStringLiteral("csx"), f.c_stick_x},
+            {QStringLiteral("csy"), f.c_stick_y},
+        });
     }
-    return lines.join(QLatin1Char('\n'));
+    const QJsonObject root{
+        {QStringLiteral("format"), ClipboardFormat},
+        {QStringLiteral("version"), 1},
+        {QStringLiteral("savedAt"), QDateTime::currentMSecsSinceEpoch()},
+        {QStringLiteral("frames"), array},
+    };
+    return QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Compact));
+}
+
+/// Parses frames copied by CTM Studio or this editor. Returns std::nullopt for other text.
+std::optional<std::vector<TasFrame>> FramesFromJson(const QString& text) {
+    const auto document = QJsonDocument::fromJson(text.toUtf8());
+    const auto root = document.object();
+    if (root.value(QStringLiteral("format")).toString() != ClipboardFormat ||
+        !root.value(QStringLiteral("frames")).isArray()) {
+        return std::nullopt;
+    }
+    std::vector<TasFrame> frames;
+    for (const auto& value : root.value(QStringLiteral("frames")).toArray()) {
+        const auto o = value.toObject();
+        const auto get = [&o](const char* key) {
+            return o.value(QString::fromLatin1(key)).toInt(0);
+        };
+        const auto s16_of = [](int v) { return static_cast<s16>(std::clamp(v, -32768, 32767)); };
+        TasFrame f;
+        f.buttons = static_cast<u16>(get("buttons") & 0x0FFF);
+        f.circle_x = s16_of(get("cx"));
+        f.circle_y = s16_of(get("cy"));
+        f.touch = get("tvalid") != 0;
+        f.touch_x = static_cast<u16>(std::clamp(get("tx"), 0, 319));
+        f.touch_y = static_cast<u16>(std::clamp(get("ty"), 0, 239));
+        f.accel = {s16_of(get("ax")), s16_of(get("ay")), s16_of(get("az"))};
+        f.gyro = {s16_of(get("gx")), s16_of(get("gy")), s16_of(get("gz"))};
+        f.zl = get("zl") != 0;
+        f.zr = get("zr") != 0;
+        f.c_stick_x = s16_of(get("csx"));
+        f.c_stick_y = s16_of(get("csy"));
+        frames.push_back(f);
+    }
+    return frames;
 }
 
 } // namespace
@@ -636,10 +685,14 @@ void TasEditorWidget::CopySelection() {
     for (const int row : rows) {
         clipboard.push_back(model->GetFrame(row));
     }
-    QApplication::clipboard()->setText(FramesToText(clipboard));
+    QApplication::clipboard()->setText(FramesToJson(clipboard));
 }
 
 void TasEditorWidget::Paste(bool insert) {
+    // Frames copied in CTM Studio (or another Azahar) take priority over the internal clipboard
+    if (auto frames = FramesFromJson(QApplication::clipboard()->text())) {
+        clipboard = std::move(*frames);
+    }
     const auto rows = SelectedRows();
     if (clipboard.empty() || rows.empty() || !model->IsEditable(rows.front())) {
         return;
@@ -743,10 +796,11 @@ void TasEditorWidget::ShowContextMenu(const QPoint& pos) {
         menu.addSeparator();
     }
     menu.addAction(tr("Copy\tCtrl+C"), this, &TasEditorWidget::CopySelection);
-    menu.addAction(tr("Paste\tCtrl+V"), this, [this] { Paste(false); })
-        ->setEnabled(!clipboard.empty());
+    const bool can_paste =
+        !clipboard.empty() || FramesFromJson(QApplication::clipboard()->text()).has_value();
+    menu.addAction(tr("Paste\tCtrl+V"), this, [this] { Paste(false); })->setEnabled(can_paste);
     menu.addAction(tr("Paste Insert\tCtrl+Shift+V"), this, [this] { Paste(true); })
-        ->setEnabled(!clipboard.empty());
+        ->setEnabled(can_paste);
     menu.addSeparator();
     menu.addAction(tr("Insert Blank Frames\tInsert"), this, &TasEditorWidget::InsertBlank);
     menu.addAction(tr("Delete Frames\tCtrl+Delete"), this, &TasEditorWidget::DeleteFrames);
