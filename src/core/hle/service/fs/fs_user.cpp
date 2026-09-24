@@ -106,6 +106,10 @@ void FS_USER::OpenFile(Kernel::HLERequestContext& ctx) {
             async_data->file =
                 archives.OpenFileFromArchive(async_data->archive_handle, async_data->file_path,
                                              async_data->mode, async_data->attributes);
+            if (Settings::values.deterministic_async_operations) {
+                // Don't compensate for the host time, it would make the timing nondeterministic
+                return static_cast<s64>(async_data->file.second.count());
+            }
             const auto time_took = std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - async_data->pre_timer);
             return static_cast<s64>(((async_data->file.second > time_took)
@@ -219,6 +223,10 @@ void FS_USER::OpenFileDirectly(Kernel::HLERequestContext& ctx) {
                 archives.OpenFileFromArchive(*async_data->archive_handle, async_data->file_path,
                                              async_data->mode, async_data->attributes);
             archives.CloseArchive(*async_data->archive_handle);
+            if (Settings::values.deterministic_async_operations) {
+                // Don't compensate for the host time, it would make the timing nondeterministic
+                return static_cast<s64>(async_data->file.second.count());
+            }
             const auto time_took = std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - async_data->pre_timer);
             return static_cast<s64>(((async_data->file.second > time_took)

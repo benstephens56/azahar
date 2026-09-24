@@ -5,6 +5,7 @@
 #include <boost/serialization/unique_ptr.hpp>
 #include "common/archives.h"
 #include "common/logging/log.h"
+#include "common/settings.h"
 #include "core/core.h"
 #include "core/file_sys/errors.h"
 #include "core/file_sys/file_backend.h"
@@ -140,7 +141,9 @@ void File::Read(Kernel::HLERequestContext& ctx) {
             }
 
             const auto read_delay = static_cast<s64>(backend->GetReadDelayNs(async_data->length));
-            if (!async_data->cache_ready) {
+            // Don't compensate for the host read time when async operations are forced to be
+            // deterministic, as that would make the emulated timing depend on the host
+            if (!async_data->cache_ready && !Settings::values.deterministic_async_operations) {
                 const auto time_took = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                            std::chrono::steady_clock::now() - async_data->pre_timer)
                                            .count();
