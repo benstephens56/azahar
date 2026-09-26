@@ -6,10 +6,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
+#include <vector>
 #include <boost/optional.hpp>
 #include <boost/serialization/version.hpp>
 #include "common/common_types.h"
@@ -132,6 +135,8 @@ public:
     /// Handles seeking and savestates of the TAS editor. Returns a result if RunLoop should
     /// return right away.
     std::optional<ResultStatus> TasUpdate();
+    /// Takes a savestate for the TAS editor
+    void TasTakeState();
 
     /**
      * Step the CPU one instruction
@@ -393,6 +398,17 @@ public:
 
     bool LoadStateBuffer(std::vector<u8> buffer);
 
+    /// Loads a savestate made by SaveStateBuffer or CompressStateBuffer, without copying it
+    bool LoadStateData(std::span<const u8> buffer);
+
+    /// Serializes the system, without compressing it. `size_hint` is the expected size.
+    std::vector<u8> SerializeState(std::size_t size_hint = 0) const;
+
+    /// Makes a savestate (as returned by SaveStateBuffer) from serialized data. Can be called from
+    /// any thread.
+    static std::vector<u8> CompressStateBuffer(std::span<const u8> data, u64 program_id,
+                                               s32 compression_level);
+
     /// Applies any changes to settings to this core instance.
     void ApplySettings();
 
@@ -506,6 +522,11 @@ private:
 
     /// Memory edits and freezes requested by frontend memory tools
     Core::MemoryEditor memory_editor;
+
+    /// Savestate of the TAS editor being compressed
+    std::shared_future<std::vector<u8>> tas_pending_state;
+    /// Expected size of the serialized system, to allocate its buffer at once
+    std::size_t tas_state_size_hint = 0;
 
     /// Inputs set by the frontend input window
     Core::InputOverride input_override;

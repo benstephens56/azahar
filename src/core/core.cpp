@@ -2,7 +2,9 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <future>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 #include <boost/serialization/array.hpp>
 #include "audio_core/dsp_interface.h"
@@ -324,7 +326,7 @@ std::optional<System::ResultStatus> System::TasUpdate() {
         }
         if (need_load) {
             try {
-                if (!LoadStateBuffer(state->state)) {
+                if (!LoadStateData(state->state.get())) {
                     frame_limiter.SetFrameAdvancing(true);
                     return std::nullopt;
                 }
@@ -353,9 +355,37 @@ std::optional<System::ResultStatus> System::TasUpdate() {
     }
 
     if (movie.TasWantsState()) {
-        movie.TasStoreState(SaveStateBuffer());
+        TasTakeState();
     }
     return std::nullopt;
+}
+
+void System::TasTakeState() {
+    // Only the serialization has to be done on this thread, the (slower) compression is done on
+    // another thread. One state is compressed at a time, which bounds the memory used by the
+    // uncompressed data.
+    if (tas_pending_state.valid()) {
+        tas_pending_state.wait();
+    }
+    auto data = SerializeState(tas_state_size_hint);
+    // Room for the state to grow a bit, as growing the buffer past its size doubles it
+    tas_state_size_hint = data.size() + data.size() / 16 + 1024 * 1024;
+
+    std::promise<std::vector<u8>> promise;
+    tas_pending_state = promise.get_future().share();
+    movie.TasStoreState(tas_pending_state);
+    std::thread([promise = std::move(promise), data = std::move(data),
+                 program_id = title_id]() mutable {
+        std::vector<u8> state;
+        try {
+            // A fast level, as these states are kept in memory only
+            state = CompressStateBuffer(data, program_id, 1);
+        } catch (const std::exception& e) {
+            // An empty state fails to load
+            LOG_ERROR(Core, "TAS editor: error compressing state: {}", e.what());
+        }
+        promise.set_value(std::move(state));
+    }).detach();
 }
 
 bool System::SendSignal(System::Signal signal, u32 param) {
@@ -795,6 +825,11 @@ void System::Shutdown(bool is_deserializing) {
 
     gpu.reset();
     if (!is_deserializing) {
+        if (tas_pending_state.valid()) {
+            tas_pending_state.wait();
+            tas_pending_state = {};
+        }
+        tas_state_size_hint = 0;
         memory_editor.ClearAll();
         input_override.Clear();
         lle_modules.clear();

@@ -19,6 +19,9 @@
 
 namespace Common::Compression {
 
+/// Default compression level of Zstandard (ZSTD_CLEVEL_DEFAULT)
+constexpr s32 DefaultLevel = 3;
+
 /**
  * Compresses a source memory region with Zstandard and returns the compressed data in a vector.
  *

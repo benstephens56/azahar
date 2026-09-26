@@ -6,6 +6,7 @@
 
 #include <array>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -220,13 +221,14 @@ public:
     /// Returns the closest savestate at or before the frame
     struct TasStateRef {
         u64 frame;
-        std::vector<u8> state;
+        /// The state (see System::SaveStateBuffer), which may still be being compressed
+        std::shared_future<std::vector<u8>> state;
     };
     std::optional<TasStateRef> TasFindState(u64 frame) const;
     /// Restores the replay position that was current when the state of the frame was taken
     void TasRestoreStatePosition(u64 frame);
     bool TasWantsState() const;
-    void TasStoreState(std::vector<u8> state);
+    void TasStoreState(std::shared_future<std::vector<u8>> state);
     void TasSetSeekTarget(std::optional<u64> frame);
     /// Called at every vblank. Returns true if a seek reached its target.
     bool TasOnVBlank();

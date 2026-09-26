@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <ctime>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <zstd.h>
@@ -24,6 +25,9 @@
 #include "common/zstd_compression.h"
 
 namespace Common::Compression {
+
+static_assert(DefaultLevel == ZSTD_CLEVEL_DEFAULT);
+
 std::vector<u8> CompressDataZSTD(std::span<const u8> source, s32 compression_level) {
     compression_level = std::clamp(compression_level, ZSTD_minCLevel(), ZSTD_maxCLevel());
     const std::size_t max_compressed_size = ZSTD_compressBound(source.size());
@@ -34,9 +38,10 @@ std::vector<u8> CompressDataZSTD(std::span<const u8> source, s32 compression_lev
         return {};
     }
 
-    std::vector<u8> compressed(max_compressed_size);
+    // Uninitialized buffer, as zeroing it is slow for large sources (e.g. savestates)
+    const std::unique_ptr<u8[]> compressed{new u8[max_compressed_size]};
     const std::size_t compressed_size = ZSTD_compress(
-        compressed.data(), compressed.size(), source.data(), source.size(), compression_level);
+        compressed.get(), max_compressed_size, source.data(), source.size(), compression_level);
 
     if (ZSTD_isError(compressed_size)) {
         LOG_ERROR(Common, "Error compressing ZSTD data: {} ({})",
@@ -44,8 +49,7 @@ std::vector<u8> CompressDataZSTD(std::span<const u8> source, s32 compression_lev
         return {};
     }
 
-    compressed.resize(compressed_size);
-    return compressed;
+    return std::vector<u8>(compressed.get(), compressed.get() + compressed_size);
 }
 
 std::vector<u8> CompressDataZSTDDefault(std::span<const u8> source) {

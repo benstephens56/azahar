@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -173,7 +174,8 @@ struct Movie::TasData {
     };
 
     struct State {
-        std::vector<u8> data;
+        /// Compressed on another thread, see System::TasTakeState
+        std::shared_future<std::vector<u8>> data;
         Position position;
     };
 
@@ -1163,7 +1165,10 @@ std::size_t Movie::TasStateMemoryUsage() const {
     std::size_t total = 0;
     if (tas) {
         for (const auto& [frame, state] : tas->states) {
-            total += state.data.size();
+            // States still being compressed are not counted
+            if (state.data.wait_for(std::chrono::seconds{0}) == std::future_status::ready) {
+                total += state.data.get().size();
+            }
         }
     }
     return total;
@@ -1269,7 +1274,7 @@ bool Movie::TasWantsState() const {
            !tas->states.contains(frame);
 }
 
-void Movie::TasStoreState(std::vector<u8> state) {
+void Movie::TasStoreState(std::shared_future<std::vector<u8>> state) {
     std::scoped_lock lock{tas_mutex};
     if (!tas) {
         return;

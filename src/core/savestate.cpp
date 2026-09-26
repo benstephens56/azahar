@@ -3,7 +3,11 @@
 // Refer to the license.txt file included.
 
 #include <chrono>
+#include <istream>
+#include <ostream>
+#include <span>
 #include <sstream>
+#include <streambuf>
 #include <cryptopp/hex.h>
 #include <fmt/ranges.h>
 #include "common/archives.h"
@@ -242,19 +246,65 @@ void System::LoadState(u32 slot) {
     ia&* this;
 }
 
-std::vector<u8> System::SaveStateBuffer() const {
-    std::ostringstream sstream{std::ios_base::binary};
-    // Serialize
-    oarchive oa{sstream};
-    oa&* this;
+namespace {
 
-    const std::string& str{sstream.str()};
-    const auto data = std::span<const u8>{reinterpret_cast<const u8*>(str.data()), str.size()};
-    auto buffer = Common::Compression::CompressDataZSTDDefault(data);
+/// Stream buffer appending to a vector, avoiding the extra copies of std::ostringstream
+class VectorWriteBuffer : public std::streambuf {
+public:
+    explicit VectorWriteBuffer(std::vector<u8>& out_) : out{out_} {}
+
+protected:
+    std::streamsize xsputn(const char* data, std::streamsize count) override {
+        const auto* bytes = reinterpret_cast<const u8*>(data);
+        out.insert(out.end(), bytes, bytes + count);
+        return count;
+    }
+
+    int_type overflow(int_type ch) override {
+        if (!traits_type::eq_int_type(ch, traits_type::eof())) {
+            out.push_back(static_cast<u8>(traits_type::to_char_type(ch)));
+        }
+        return traits_type::not_eof(ch);
+    }
+
+private:
+    std::vector<u8>& out;
+};
+
+/// Stream buffer reading from memory without copying it
+class MemoryReadBuffer : public std::streambuf {
+public:
+    explicit MemoryReadBuffer(std::span<const u8> data) {
+        auto* begin = const_cast<char*>(reinterpret_cast<const char*>(data.data()));
+        setg(begin, begin, begin + data.size());
+    }
+};
+
+} // namespace
+
+std::vector<u8> System::SaveStateBuffer() const {
+    return CompressStateBuffer(SerializeState(), title_id, Common::Compression::DefaultLevel);
+}
+
+std::vector<u8> System::SerializeState(std::size_t size_hint) const {
+    std::vector<u8> data;
+    data.reserve(size_hint);
+    VectorWriteBuffer buffer{data};
+    std::ostream stream{&buffer};
+    {
+        oarchive oa{stream};
+        oa&* this;
+    }
+    return data;
+}
+
+std::vector<u8> System::CompressStateBuffer(std::span<const u8> data, u64 program_id,
+                                            s32 compression_level) {
+    const auto compressed = Common::Compression::CompressDataZSTD(data, compression_level);
 
     CSTHeader header{};
     header.filetype = header_magic_bytes;
-    header.program_id = title_id;
+    header.program_id = program_id;
     std::string rev_bytes;
     CryptoPP::StringSource ss(Common::g_scm_rev, true,
                               new CryptoPP::HexDecoder(new CryptoPP::StringSink(rev_bytes)));
@@ -272,13 +322,19 @@ std::vector<u8> System::SaveStateBuffer() const {
     std::memcpy(header.build_version.data(), build_version.c_str(),
                 std::min(build_version.length(), sizeof(header.build_version) - 1));
 
-    std::vector<u8> result((u8*)&header, (u8*)&header + sizeof(header));
-    std::copy(buffer.begin(), buffer.end(), std::back_inserter(result));
-
+    std::vector<u8> result;
+    result.reserve(sizeof(header) + compressed.size());
+    result.insert(result.end(), reinterpret_cast<const u8*>(&header),
+                  reinterpret_cast<const u8*>(&header) + sizeof(header));
+    result.insert(result.end(), compressed.begin(), compressed.end());
     return result;
 }
 
 bool System::LoadStateBuffer(std::vector<u8> buffer) {
+    return LoadStateData(buffer);
+}
+
+bool System::LoadStateData(std::span<const u8> buffer) {
     CSTHeader header;
 
     if (buffer.size() < sizeof(header)) {
@@ -286,7 +342,7 @@ bool System::LoadStateBuffer(std::vector<u8> buffer) {
         return false;
     }
 
-    header = *((CSTHeader*)buffer.data());
+    std::memcpy(&header, buffer.data(), sizeof(header));
 
     if (header.filetype != header_magic_bytes) {
         LOG_ERROR(Core, "Invalid save state");
@@ -305,16 +361,13 @@ bool System::LoadStateBuffer(std::vector<u8> buffer) {
         return false;
     }
 
-    std::vector<u8> state(buffer.begin() + sizeof(CSTHeader), buffer.end());
-    auto decompressed = Common::Compression::DecompressDataZSTD(state);
-
-    std::istringstream sstream{
-        std::string{reinterpret_cast<char*>(decompressed.data()), decompressed.size()},
-        std::ios_base::binary};
-    decompressed.clear();
+    const auto decompressed =
+        Common::Compression::DecompressDataZSTD(buffer.subspan(sizeof(header)));
+    MemoryReadBuffer read_buffer{decompressed};
+    std::istream stream{&read_buffer};
 
     // Deserialize
-    iarchive ia{sstream};
+    iarchive ia{stream};
     ia&* this;
 
     return true;
