@@ -130,6 +130,70 @@ struct CTMHeader {
     std::array<u8, 156> reserved; /// Make heading 256 bytes so it has consistent size
 };
 static_assert(sizeof(CTMHeader) == 256, "CTMHeader should be 256 bytes");
+
+namespace {
+
+constexpr std::size_t NumStateTypes = 6;
+constexpr u64 NoFrame = std::numeric_limits<u64>::max();
+
+constexpr u8 TypeBit(ControllerStateType type) {
+    return static_cast<u8>(1u << static_cast<u8>(type));
+}
+
+constexpr u8 AllTypes = (1u << NumStateTypes) - 1;
+
+// Pad bits of ControllerState::pad_and_circle that are shown in the editor (A to Y)
+constexpr u16 EditorButtonMask = 0x0FFF;
+
+constexpr int CStickMax = 0x9C;
+constexpr int ExtraHidCStickCenter = 0x800;
+constexpr int ExtraHidCStickRadius = 0x7FF;
+
+} // namespace
+
+struct Movie::TasData {
+    struct Frame {
+        /// Inputs captured when the frame was emulated, in the order they were read
+        std::vector<ControllerState> polls;
+        /// Values shown in the editor (from the first input of each type, or set by the user)
+        TasFrame values;
+        /// Types (bits) whose inputs are generated from `values` instead of replayed from `polls`
+        u8 edited = 0;
+        /// Types (bits) that have at least one captured input
+        u8 seen = 0;
+        /// False for frames emulated before the editor was enabled
+        bool known = true;
+    };
+
+    /// Replay position within the current frame
+    struct Position {
+        u64 frame = NoFrame;
+        std::array<u32, NumStateTypes> cursors{};
+        bool capturing = false;
+    };
+
+    struct State {
+        std::vector<u8> data;
+        Position position;
+    };
+
+    std::vector<Frame> frames;
+    u64 first_frame = 0;
+    Position position;
+    bool overwrite = false;
+
+    std::map<u64, State> states;
+    u32 state_interval = 60;
+    u32 state_capacity = 60;
+
+    std::optional<u64> seek_request;
+    std::optional<u64> seek_target;
+    std::atomic<u64> current_frame{0};
+
+    void ResetPosition() {
+        position = Position{};
+    }
+};
 #pragma pack(pop)
 
 static u64 GetInputCount(std::span<const u8> input) {
@@ -774,70 +838,6 @@ void Movie::HandleExtraHidResponse(Service::IR::ExtraHIDResponse& extra_hid_resp
 // -------------------------------------------------------------------------------------------------
 // TAS editor
 // -------------------------------------------------------------------------------------------------
-
-namespace {
-
-constexpr std::size_t NumStateTypes = 6;
-constexpr u64 NoFrame = std::numeric_limits<u64>::max();
-
-constexpr u8 TypeBit(ControllerStateType type) {
-    return static_cast<u8>(1u << static_cast<u8>(type));
-}
-
-constexpr u8 AllTypes = (1u << NumStateTypes) - 1;
-
-// Pad bits of ControllerState::pad_and_circle that are shown in the editor (A to Y)
-constexpr u16 EditorButtonMask = 0x0FFF;
-
-constexpr int CStickMax = 0x9C;
-constexpr int ExtraHidCStickCenter = 0x800;
-constexpr int ExtraHidCStickRadius = 0x7FF;
-
-} // namespace
-
-struct Movie::TasData {
-    struct Frame {
-        /// Inputs captured when the frame was emulated, in the order they were read
-        std::vector<ControllerState> polls;
-        /// Values shown in the editor (from the first input of each type, or set by the user)
-        TasFrame values;
-        /// Types (bits) whose inputs are generated from `values` instead of replayed from `polls`
-        u8 edited = 0;
-        /// Types (bits) that have at least one captured input
-        u8 seen = 0;
-        /// False for frames emulated before the editor was enabled
-        bool known = true;
-    };
-
-    /// Replay position within the current frame
-    struct Position {
-        u64 frame = NoFrame;
-        std::array<u32, NumStateTypes> cursors{};
-        bool capturing = false;
-    };
-
-    struct State {
-        std::vector<u8> data;
-        Position position;
-    };
-
-    std::vector<Frame> frames;
-    u64 first_frame = 0;
-    Position position;
-    bool overwrite = false;
-
-    std::map<u64, State> states;
-    u32 state_interval = 60;
-    u32 state_capacity = 60;
-
-    std::optional<u64> seek_request;
-    std::optional<u64> seek_target;
-    std::atomic<u64> current_frame{0};
-
-    void ResetPosition() {
-        position = Position{};
-    }
-};
 
 void Movie::EnableTasEditor(bool enable) {
     std::scoped_lock lock{tas_mutex};
