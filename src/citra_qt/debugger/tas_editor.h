@@ -5,6 +5,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <QAbstractTableModel>
 #include <QDockWidget>
@@ -99,6 +100,8 @@ private:
     int rows = ExtraRows;
     mutable std::unordered_map<int, Core::Movie::TasFrame> cache;
     mutable std::unordered_map<int, bool> edited_cache;
+    /// Rows (among the visible ones) that have a savestate
+    std::unordered_set<int> state_cache;
 };
 
 /**
@@ -129,6 +132,8 @@ private:
     void Seek(u64 frame);
     void OnFramesEdited(int first_row);
     void RestorePosition();
+    /// Sets the widths of the columns to fit the widest values they can have
+    void SizeColumns();
 
     std::vector<int> SelectedRows() const;
     void CopySelection();

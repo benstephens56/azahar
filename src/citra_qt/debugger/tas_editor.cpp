@@ -4,11 +4,13 @@
 
 #include <algorithm>
 #include <functional>
+#include <utility>
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QDateTime>
 #include <QFileDialog>
+#include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QJsonArray>
@@ -252,6 +254,8 @@ bool TasEditorModel::SetFrame(int row, const TasFrame& frame) {
 
 void TasEditorModel::Refresh(int first_visible, int last_visible) {
     const int new_count = static_cast<int>(movie.TasFrameCount());
+    const int old_first_frame = first_frame;
+    const u64 old_current_frame = current_frame;
     first_frame = static_cast<int>(movie.TasFirstFrame());
     current_frame = movie.TasCurrentFrame();
 
@@ -272,8 +276,9 @@ void TasEditorModel::Refresh(int first_visible, int last_visible) {
     if (first_visible < 0) {
         return;
     }
-    cache.clear();
-    edited_cache.clear();
+    const auto old_cache = std::exchange(cache, {});
+    const auto old_edited_cache = std::exchange(edited_cache, {});
+    const auto old_state_cache = std::exchange(state_cache, {});
     const auto frames =
         movie.TasGetFrames(static_cast<std::size_t>(first_visible),
                            static_cast<std::size_t>(last_visible - first_visible + 1));
@@ -282,7 +287,51 @@ void TasEditorModel::Refresh(int first_visible, int last_visible) {
         cache.emplace(row, frames[i]);
         edited_cache.emplace(row, movie.TasIsFrameEdited(static_cast<std::size_t>(row)));
     }
-    emit dataChanged(index(first_visible, 0), index(last_visible, ColumnCount - 1));
+    for (int row = first_visible; row <= last_visible; ++row) {
+        if (movie.TasHasState(static_cast<u64>(row))) {
+            state_cache.insert(row);
+        }
+    }
+
+    // Only repaint the rows that changed, repainting all of them several times per second is slow
+    if (first_frame != old_first_frame) {
+        emit dataChanged(index(first_visible, 0), index(last_visible, ColumnCount - 1));
+        return;
+    }
+    const auto changed = [&](int row) {
+        // Rows between the old and new current frame change color
+        const u64 r = static_cast<u64>(row);
+        if (r >= std::min(old_current_frame, current_frame) &&
+            r <= std::max(old_current_frame, current_frame)) {
+            return true;
+        }
+        const auto old_it = old_cache.find(row);
+        const auto new_it = cache.find(row);
+        if ((old_it == old_cache.end()) != (new_it == cache.end()) ||
+            (new_it != cache.end() && old_it->second != new_it->second)) {
+            return true;
+        }
+        const auto old_edited = old_edited_cache.find(row);
+        const auto new_edited = edited_cache.find(row);
+        if ((old_edited == old_edited_cache.end() ? false : old_edited->second) !=
+            (new_edited == edited_cache.end() ? false : new_edited->second)) {
+            return true;
+        }
+        return old_state_cache.contains(row) != state_cache.contains(row);
+    };
+    int first_changed = -1;
+    int last_changed = -1;
+    for (int row = first_visible; row <= last_visible; ++row) {
+        if (changed(row)) {
+            if (first_changed < 0) {
+                first_changed = row;
+            }
+            last_changed = row;
+        }
+    }
+    if (first_changed >= 0) {
+        emit dataChanged(index(first_changed, 0), index(last_changed, ColumnCount - 1));
+    }
 }
 
 QVariant TasEditorModel::data(const QModelIndex& index, int role) const {
@@ -307,7 +356,7 @@ QVariant TasEditorModel::data(const QModelIndex& index, int role) const {
         if (row < first_frame) {
             return QColor(128, 128, 128, 90);
         }
-        if (column == ColumnFrame && movie.TasHasState(static_cast<u64>(row))) {
+        if (column == ColumnFrame && state_cache.contains(row)) {
             return QColor(60, 170, 60, 140);
         }
         if (static_cast<u64>(row) < current_frame) {
@@ -520,8 +569,11 @@ TasEditorWidget::TasEditorWidget(Core::System& system_, QWidget* parent)
     view->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
     view->verticalHeader()->setVisible(false);
     view->verticalHeader()->setDefaultSectionSize(view->fontMetrics().height() + 4);
-    view->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    // Not QHeaderView::ResizeToContents: measuring the rows whenever the table changes (several
+    // times per second while emulating) is slow enough to make emulation choppy
+    view->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     view->horizontalHeader()->setMinimumSectionSize(24);
+    SizeColumns();
     view->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(view, &QTableView::customContextMenuRequested, this, &TasEditorWidget::ShowContextMenu);
     connect(view, &QTableView::doubleClicked, this, [this](const QModelIndex& index) {
@@ -553,6 +605,42 @@ TasEditorWidget::TasEditorWidget(Core::System& system_, QWidget* parent)
 }
 
 TasEditorWidget::~TasEditorWidget() = default;
+
+void TasEditorWidget::SizeColumns() {
+    const QFontMetrics metrics = view->fontMetrics();
+    const QFontMetrics header_metrics = view->horizontalHeader()->fontMetrics();
+    const int padding = metrics.horizontalAdvance(QStringLiteral("00"));
+    for (int column = 0; column < TasEditorModel::ColumnCount; ++column) {
+        QString widest;
+        switch (column) {
+        case TasEditorModel::ColumnFrame:
+            widest = QStringLiteral("0000000");
+            break;
+        case TasEditorModel::ColumnCircleX:
+        case TasEditorModel::ColumnCircleY:
+        case TasEditorModel::ColumnCStickX:
+        case TasEditorModel::ColumnCStickY:
+            widest = QStringLiteral("-000");
+            break;
+        case TasEditorModel::ColumnTouch:
+            widest = QStringLiteral("000, 000");
+            break;
+        case TasEditorModel::ColumnAccel:
+        case TasEditorModel::ColumnGyro:
+            widest = FormatVector({-32768, -32768, -32768});
+            break;
+        default:
+            // Buttons show their name, like the header
+            break;
+        }
+        const QString header =
+            model->headerData(column, Qt::Horizontal, Qt::DisplayRole).toString();
+        const int width =
+            std::max(metrics.horizontalAdvance(widest), header_metrics.horizontalAdvance(header)) +
+            padding;
+        view->horizontalHeader()->resizeSection(column, width);
+    }
+}
 
 void TasEditorWidget::OnEmulationStarting(EmuThread*) {
     restore_frame.reset();
