@@ -781,12 +781,31 @@ void TasEditorWidget::Paste(bool insert) {
     if (auto frames = FramesFromJson(QApplication::clipboard()->text())) {
         clipboard = std::move(*frames);
     }
-    const auto rows = SelectedRows();
-    if (clipboard.empty() || rows.empty() || !model->IsEditable(rows.front())) {
+    auto rows = SelectedRows();
+    if (rows.empty() && view->currentIndex().isValid()) {
+        rows.push_back(view->currentIndex().row());
+    }
+    auto& movie = system.Movie();
+    QString error;
+    if (clipboard.empty()) {
+        error = tr("There are no frames to paste. Copy frames in this editor or in CTM Studio "
+                   "first.");
+    } else if (!movie.IsTasEditorEnabled() ||
+               movie.GetPlayMode() != Core::Movie::PlayMode::Recording) {
+        error = tr("Frames can only be pasted while a movie is being recorded, with the TAS "
+                   "editor enabled.");
+    } else if (rows.empty()) {
+        error = tr("Select the frame to paste at first.");
+    } else if (!model->IsEditable(rows.front())) {
+        error = tr("Frames can't be pasted before frame %1, which was emulated before the TAS "
+                   "editor was enabled.")
+                    .arg(movie.TasFirstFrame());
+    }
+    if (!error.isEmpty()) {
+        QMessageBox::information(this, tr("TAS Editor"), error);
         return;
     }
     const int start = rows.front();
-    auto& movie = system.Movie();
     if (insert) {
         if (start > model->FrameCount()) {
             // Fill the gap before the pasted frames
@@ -937,6 +956,11 @@ bool TasEditorWidget::eventFilter(QObject* object, QEvent* event) {
             const QModelIndex index = view->indexAt(mouse_event->position().toPoint());
             if (index.isValid() && TasEditorModel::IsButtonColumn(index.column()) &&
                 model->IsEditable(index.row())) {
+                // The click is not passed to the table, select the row and take the focus here so
+                // the keyboard shortcuts (e.g. paste) apply to it
+                view->setFocus(Qt::MouseFocusReason);
+                view->selectionModel()->setCurrentIndex(index, QItemSelectionModel::ClearAndSelect |
+                                                                   QItemSelectionModel::Rows);
                 TasFrame frame = model->GetFrame(index.row());
                 draw_value = !TasEditorModel::GetButton(frame, index.column());
                 TasEditorModel::SetButton(frame, index.column(), draw_value);
