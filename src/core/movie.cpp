@@ -310,7 +310,6 @@ void Movie::CheckInputEnd() {
             // The whole movie is now in the TAS editor, continue by recording from here
             play_mode = PlayMode::Recording;
             read_only = false;
-            system.frame_limiter.SetUnthrottled(false);
         } else {
             play_mode = PlayMode::MovieFinished;
         }
@@ -634,10 +633,10 @@ void Movie::StartPlayback(const std::string& movie_file) {
 
             tas_origin_ticks = system.IsPoweredOn() ? system.CoreTiming().GetTicks() : 0;
             if (tas) {
-                // Play the whole movie as fast as possible to capture it into the TAS editor
+                // The movie is captured into the TAS editor while it plays, at the emulation
+                // speed chosen by the user
                 std::scoped_lock lock{tas_mutex};
                 tas = std::make_unique<TasData>();
-                system.frame_limiter.SetUnthrottled(true);
             }
 
             LOG_INFO(Movie, "Loaded Movie, ID: {:016X}", id);
