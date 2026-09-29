@@ -11,7 +11,6 @@
 #include "common/common_types.h"
 
 class EmuThread;
-class QCheckBox;
 class QTableWidget;
 class QTableWidgetItem;
 
@@ -52,6 +51,7 @@ private:
         ColumnLabel,
         ColumnAddress,
         ColumnType,
+        ColumnHex,
         ColumnValue,
         ColumnCount,
     };
@@ -60,6 +60,8 @@ private:
         QString label;
         VAddr address = 0;
         MemoryTools::ValueType type = MemoryTools::ValueType::U32;
+        /// Show (and enter) the value in hexadecimal
+        bool hex = false;
     };
 
     void RebuildTable();
@@ -83,7 +85,6 @@ private:
     std::vector<WatchEntry> entries;
 
     QTableWidget* table;
-    QCheckBox* hex_check;
     QTimer update_timer;
 
     bool emulation_running = false;

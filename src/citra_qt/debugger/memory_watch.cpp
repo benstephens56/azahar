@@ -59,8 +59,11 @@ MemoryWatchWidget::MemoryWatchWidget(Core::System& system_, QWidget* parent)
 
     table = new QTableWidget(0, ColumnCount, main_widget);
     table->setHorizontalHeaderLabels(
-        {tr("Freeze"), tr("Label"), tr("Address"), tr("Type"), tr("Value")});
+        {tr("Freeze"), tr("Label"), tr("Address"), tr("Type"), tr("Hex"), tr("Value")});
     table->horizontalHeader()->setSectionResizeMode(ColumnFreeze, QHeaderView::ResizeToContents);
+    table->horizontalHeader()->setSectionResizeMode(ColumnHex, QHeaderView::ResizeToContents);
+    table->horizontalHeaderItem(ColumnHex)->setToolTip(
+        tr("Show the value in hexadecimal. Values typed in a hex row are read as hexadecimal."));
     table->horizontalHeader()->setStretchLastSection(true);
     table->verticalHeader()->setVisible(false);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -85,10 +88,6 @@ MemoryWatchWidget::MemoryWatchWidget(Core::System& system_, QWidget* parent)
     add_button(tr("Import..."), tr("Load a watch list from a file"), [this] { OnImport(); });
     add_button(tr("Export..."), tr("Save the watch list to a file"), [this] { OnExport(); });
     button_row->addStretch();
-    hex_check = new QCheckBox(tr("Hex"), main_widget);
-    hex_check->setToolTip(tr("Show values in hexadecimal"));
-    connect(hex_check, &QCheckBox::toggled, this, [this] { UpdateValues(); });
-    button_row->addWidget(hex_check);
     layout->addLayout(button_row);
 
     setWidget(main_widget);
@@ -121,6 +120,7 @@ void MemoryWatchWidget::LoadList(const QString& path) {
         entry.type =
             static_cast<ValueType>(std::clamp(settings.value(QStringLiteral("type"), 4).toInt(), 0,
                                               static_cast<int>(ValueType::Float)));
+        entry.hex = settings.value(QStringLiteral("hex"), false).toBool();
         entries.push_back(entry);
     }
     settings.endArray();
@@ -137,6 +137,7 @@ void MemoryWatchWidget::SaveList(const QString& path) const {
         settings.setValue(QStringLiteral("label"), entries[i].label);
         settings.setValue(QStringLiteral("address"), entries[i].address);
         settings.setValue(QStringLiteral("type"), static_cast<int>(entries[i].type));
+        settings.setValue(QStringLiteral("hex"), entries[i].hex);
     }
     settings.endArray();
 }
@@ -205,6 +206,11 @@ void MemoryWatchWidget::RebuildTable() {
         table->setItem(row, ColumnAddress, new QTableWidgetItem(FormatAddress(entry.address)));
         table->setItem(row, ColumnType,
                        new QTableWidgetItem(TypeNames()[static_cast<int>(entry.type)]));
+
+        auto* hex_item = new QTableWidgetItem();
+        hex_item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsUserCheckable);
+        hex_item->setCheckState(entry.hex ? Qt::Checked : Qt::Unchecked);
+        table->setItem(row, ColumnHex, hex_item);
         table->setItem(row, ColumnValue, new QTableWidgetItem(QStringLiteral("-")));
     }
     updating = false;
@@ -213,7 +219,6 @@ void MemoryWatchWidget::RebuildTable() {
 
 void MemoryWatchWidget::UpdateValues() {
     auto& editor = system.MemoryEditor();
-    const bool hex = hex_check->isChecked();
 
     updating = true;
     for (int row = 0; row < static_cast<int>(entries.size()); ++row) {
@@ -232,8 +237,9 @@ void MemoryWatchWidget::UpdateValues() {
         QString text = QStringLiteral("-");
         if (emulation_running) {
             const auto bytes = editor.Peek(entry.address, ValueSize(entry.type));
-            text = bytes ? FormatValue(entry.type, RawFromBytes(entry.type, bytes->data()), hex)
-                         : tr("(unreadable)");
+            text = bytes
+                       ? FormatValue(entry.type, RawFromBytes(entry.type, bytes->data()), entry.hex)
+                       : tr("(unreadable)");
         }
         if (value_item->text() != text) {
             value_item->setText(text);
@@ -301,8 +307,16 @@ void MemoryWatchWidget::OnItemChanged(QTableWidgetItem* item) {
         updating = false;
         break;
     }
-    case ColumnValue:
-        if (const auto raw = ParseValue(entry.type, item->text()); raw && emulation_running) {
+    case ColumnHex:
+        entry.hex = item->checkState() == Qt::Checked;
+        break;
+    case ColumnValue: {
+        QString text = item->text().trimmed();
+        if (entry.hex && !text.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) {
+            // Hex rows take hexadecimal input with or without the 0x prefix
+            text.prepend(QStringLiteral("0x"));
+        }
+        if (const auto raw = ParseValue(entry.type, text); raw && emulation_running) {
             auto bytes = BytesFromRaw(entry.type, *raw);
             if (editor.IsFrozen(entry.address)) {
                 editor.Freeze(entry.address, std::move(bytes));
@@ -311,6 +325,7 @@ void MemoryWatchWidget::OnItemChanged(QTableWidgetItem* item) {
             }
         }
         break;
+    }
     default:
         break;
     }
