@@ -114,8 +114,14 @@ private:
     };
 
     QWidget* CreateButtonsGroup();
-    /// Clamps a stick position to the circle allowed by the stick's maximum output
-    Override::Stick ClampStick(const StickControls& controls, int x, int y) const;
+    /// Which axis of a stick position to keep as is when it is outside the allowed circle
+    enum class KeepAxis { None, X, Y };
+
+    /// Clamps a stick position to the circle allowed by the stick's maximum output. With
+    /// KeepAxis::None the position is moved towards the center, otherwise only the other axis is
+    /// reduced (so editing one field slides the stick along the edge of the circle).
+    Override::Stick ClampStick(const StickControls& controls, int x, int y,
+                               KeepAxis keep = KeepAxis::None) const;
 
     QWidget* CreateStickGroup(const QString& title, StickControls& controls,
                               std::optional<Override::Stick> Override::State::*member);

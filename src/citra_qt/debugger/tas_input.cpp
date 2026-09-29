@@ -346,6 +346,19 @@ QWidget* TasInputWidget::CreateStickGroup(const QString& title, StickControls& c
         overrides.*member = ClampStick(controls, x, y);
         Apply();
     };
+    const auto set_keeping = [this, member, &controls](int x, int y, KeepAxis keep) {
+        overrides.*member = ClampStick(controls, x, y, keep);
+        Apply();
+        // The field being edited is not updated by Apply (so typing isn't disturbed), but it must
+        // show the value actually used if it had to be clamped
+        QSpinBox* edited = keep == KeepAxis::X ? controls.x : controls.y;
+        const int value = keep == KeepAxis::X ? (overrides.*member)->x : (overrides.*member)->y;
+        if (edited->value() != value) {
+            const QSignalBlocker blocker(edited);
+            edited->setValue(value);
+        }
+        edited->setProperty(ShownProperty, value);
+    };
     connect(controls.max_output, &QSpinBox::valueChanged, this,
             [this, member, &controls](int value) {
                 system.InputOverride().SetMaxOutput(controls.id, value);
@@ -364,15 +377,18 @@ QWidget* TasInputWidget::CreateStickGroup(const QString& title, StickControls& c
     };
     connect(controls.pad, &TasInputPad::Cleared, this, clear_stick);
     connect(clear, &QPushButton::clicked, this, clear_stick);
-    // Editing one field locks the stick at the values shown in both fields
-    const auto on_spin = [set, &controls](int) { set(controls.x->value(), controls.y->value()); };
-    connect(controls.x, &QSpinBox::valueChanged, this, on_spin);
-    connect(controls.y, &QSpinBox::valueChanged, this, on_spin);
-    // Make sure a value the user entered is used when leaving the field
-    for (QSpinBox* spin : {controls.x, controls.y}) {
+    // Editing one field locks the stick at the values shown in both fields, keeping the edited
+    // value and moving the other axis if needed to stay inside the max output
+    for (const KeepAxis keep : {KeepAxis::X, KeepAxis::Y}) {
+        QSpinBox* spin = keep == KeepAxis::X ? controls.x : controls.y;
+        const auto on_spin = [set_keeping, &controls, keep] {
+            set_keeping(controls.x->value(), controls.y->value(), keep);
+        };
+        connect(spin, &QSpinBox::valueChanged, this, on_spin);
+        // Make sure a value the user entered is used when leaving the field
         connect(spin, &QSpinBox::editingFinished, this, [on_spin, spin] {
             if (ChangedByUser(spin)) {
-                on_spin(0);
+                on_spin();
             }
         });
     }
@@ -380,8 +396,19 @@ QWidget* TasInputWidget::CreateStickGroup(const QString& title, StickControls& c
 }
 
 TasInputWidget::Override::Stick TasInputWidget::ClampStick(const StickControls& controls, int x,
-                                                           int y) const {
+                                                           int y, KeepAxis keep) const {
     const double max_length = StickRange * controls.max_output->value() / 100.0;
+    if (keep != KeepAxis::None) {
+        // Keep the edited axis (within the circle) and reduce the other one to fit
+        int& kept = keep == KeepAxis::X ? x : y;
+        int& other = keep == KeepAxis::X ? y : x;
+        const int max_kept = static_cast<int>(std::floor(max_length));
+        kept = std::clamp(kept, -max_kept, max_kept);
+        const int max_other = static_cast<int>(std::floor(
+            std::sqrt(std::max(0.0, max_length * max_length - static_cast<double>(kept) * kept))));
+        other = std::clamp(other, -max_other, max_other);
+        return Override::Stick{static_cast<s16>(x), static_cast<s16>(y)};
+    }
     const double length = std::sqrt(static_cast<double>(x) * x + static_cast<double>(y) * y);
     if (length > max_length) {
         // Scale towards the center and truncate, so the result stays inside the circle
