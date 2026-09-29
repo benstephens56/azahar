@@ -59,11 +59,26 @@ void SetOverriddenStyle(QWidget* widget, bool overridden) {
     widget->setFont(font);
 }
 
+/// Name of the property holding the value the window last showed in a field
+constexpr char ShownProperty[] = "tas_shown";
+
 void SetSpinValue(QSpinBox* spin, int value) {
     // Don't overwrite what the user is typing
-    if (!spin->hasFocus() && spin->value() != value) {
+    if (spin->hasFocus()) {
+        return;
+    }
+    spin->setProperty(ShownProperty, value);
+    if (spin->value() != value) {
+        // Programmatic changes must not be taken as user input
+        const QSignalBlocker blocker(spin);
         spin->setValue(value);
     }
+}
+
+/// Whether the user changed the value of a field from what the window last showed in it
+bool ChangedByUser(const QSpinBox* spin) {
+    const QVariant shown = spin->property(ShownProperty);
+    return !shown.isValid() || shown.toInt() != spin->value();
 }
 
 } // namespace
@@ -319,6 +334,11 @@ QWidget* TasInputWidget::CreateStickGroup(const QString& title, StickControls& c
     controls.max_output->setToolTip(
         tr("Limits the stick to a smaller circle, for both this window and the controller"));
     max_output_row->addWidget(controls.max_output);
+    auto* reset_max_output = new QPushButton(tr("Clear"), group);
+    reset_max_output->setToolTip(tr("Sets the max output back to 100%"));
+    connect(reset_max_output, &QPushButton::clicked, this,
+            [&controls] { controls.max_output->setValue(100); });
+    max_output_row->addWidget(reset_max_output);
     max_output_row->addStretch();
     layout->addLayout(max_output_row);
 
@@ -345,13 +365,17 @@ QWidget* TasInputWidget::CreateStickGroup(const QString& title, StickControls& c
     connect(controls.pad, &TasInputPad::Cleared, this, clear_stick);
     connect(clear, &QPushButton::clicked, this, clear_stick);
     // Editing one field locks the stick at the values shown in both fields
-    const auto on_spin = [this, set, &controls](int) {
-        if (!updating) {
-            set(controls.x->value(), controls.y->value());
-        }
-    };
+    const auto on_spin = [set, &controls](int) { set(controls.x->value(), controls.y->value()); };
     connect(controls.x, &QSpinBox::valueChanged, this, on_spin);
     connect(controls.y, &QSpinBox::valueChanged, this, on_spin);
+    // Make sure a value the user entered is used when leaving the field
+    for (QSpinBox* spin : {controls.x, controls.y}) {
+        connect(spin, &QSpinBox::editingFinished, this, [on_spin, spin] {
+            if (ChangedByUser(spin)) {
+                on_spin(0);
+            }
+        });
+    }
     return group;
 }
 
@@ -406,13 +430,16 @@ QWidget* TasInputWidget::CreateTouchGroup() {
     connect(touch_check, &QCheckBox::clicked, this, [this, set, clear_touch](bool checked) {
         checked ? set(touch_x->value(), touch_y->value()) : clear_touch();
     });
-    const auto on_spin = [this, set](int) {
-        if (!updating) {
-            set(touch_x->value(), touch_y->value());
-        }
-    };
+    const auto on_spin = [this, set](int) { set(touch_x->value(), touch_y->value()); };
     connect(touch_x, &QSpinBox::valueChanged, this, on_spin);
     connect(touch_y, &QSpinBox::valueChanged, this, on_spin);
+    for (QSpinBox* spin : {touch_x, touch_y}) {
+        connect(spin, &QSpinBox::editingFinished, this, [on_spin, spin] {
+            if (ChangedByUser(spin)) {
+                on_spin(0);
+            }
+        });
+    }
     return group;
 }
 
@@ -437,13 +464,17 @@ QWidget* TasInputWidget::CreateMotionGroup(
         grid->addWidget(control.spin, static_cast<int>(axis), 2);
 
         const auto set = [this, member, axis](int value) {
-            if (!updating) {
-                (overrides.*member)[axis] = static_cast<s16>(value);
-                Apply();
-            }
+            (overrides.*member)[axis] = static_cast<s16>(value);
+            Apply();
         };
         connect(control.slider, &QSlider::valueChanged, this, set);
         connect(control.spin, &QSpinBox::valueChanged, this, set);
+        // Make sure a value the user entered is used when leaving the field
+        connect(control.spin, &QSpinBox::editingFinished, this, [set, spin = control.spin] {
+            if (ChangedByUser(spin)) {
+                set(spin->value());
+            }
+        });
     }
     auto* clear = new QPushButton(tr("Clear"), group);
     connect(clear, &QPushButton::clicked, this, [this, member] {
@@ -597,6 +628,7 @@ void TasInputWidget::Refresh() {
         for (std::size_t axis = 0; axis < 3; ++axis) {
             const int value = set[axis].value_or(emulation_running ? live_values[axis] : 0);
             if (!controls[axis].slider->isSliderDown() && controls[axis].slider->value() != value) {
+                const QSignalBlocker blocker(controls[axis].slider);
                 controls[axis].slider->setValue(value);
             }
             SetSpinValue(controls[axis].spin, value);
