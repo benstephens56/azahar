@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <functional>
+#include <limits>
+#include <map>
 #include <utility>
 #include <QApplication>
 #include <QCheckBox>
@@ -21,13 +23,16 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QSpinBox>
+#include <QStyledItemDelegate>
 #include <QTableView>
 #include <QVBoxLayout>
 #include "citra_qt/debugger/tas_editor.h"
+#include "citra_qt/uisettings.h"
 #include "core/core.h"
 
 using TasFrame = Core::Movie::TasFrame;
@@ -56,6 +61,11 @@ constexpr std::array<ButtonColumn, 14> ButtonColumns{{
     {TasEditorModel::ColumnLeft, "←", 5},
     {TasEditorModel::ColumnRight, "→", 4},
 }};
+
+/// Background of the row of the current frame, distinct from the selection color
+const QColor CurrentFrameColor(230, 0, 160, 60);
+/// Outline of the row of the current frame, drawn over selected cells too
+const QColor CurrentFrameOutline(230, 0, 160);
 
 const ButtonColumn* FindButton(int column) {
     for (const auto& button : ButtonColumns) {
@@ -235,13 +245,23 @@ bool TasEditorModel::SetFrame(int row, const TasFrame& frame) {
     if (!IsEditable(row)) {
         return false;
     }
+    if (row < frame_count && GetFrame(row) == frame) {
+        // Nothing changes (e.g. drawing over a button that is already set)
+        return true;
+    }
     if (row >= frame_count) {
         // Append frames up to the edited one
-        std::vector<TasFrame> frames(static_cast<std::size_t>(row - frame_count + 1), BlankFrame());
+        const int start = frame_count;
+        std::vector<TasFrame> frames(static_cast<std::size_t>(row - start + 1), BlankFrame());
         frames.back() = frame;
-        movie.TasInsertFrames(static_cast<std::size_t>(frame_count), frames);
+        auto before = movie.TasCopyFrames(static_cast<std::size_t>(start), 0);
+        movie.TasInsertFrames(static_cast<std::size_t>(start), frames);
+        Record({start, std::move(before),
+                movie.TasCopyFrames(static_cast<std::size_t>(start), frames.size())});
     } else {
+        auto before = movie.TasCopyFrames(static_cast<std::size_t>(row), 1);
         movie.TasSetFrame(static_cast<std::size_t>(row), frame);
+        Record({row, std::move(before), movie.TasCopyFrames(static_cast<std::size_t>(row), 1)});
     }
     cache.erase(row);
     edited_cache.erase(row);
@@ -250,6 +270,143 @@ bool TasEditorModel::SetFrame(int row, const TasFrame& frame) {
     const QModelIndex right = index(row, ColumnCount - 1);
     emit dataChanged(left, right);
     return true;
+}
+
+bool TasEditorModel::InsertFrames(int row, const std::vector<TasFrame>& frames) {
+    if (frames.empty() || !IsEditable(row)) {
+        return false;
+    }
+    int start = row;
+    std::vector<TasFrame> inserted;
+    if (row > frame_count) {
+        // Fill the gap before the inserted frames
+        inserted.assign(static_cast<std::size_t>(row - frame_count), BlankFrame());
+        start = frame_count;
+    }
+    inserted.insert(inserted.end(), frames.begin(), frames.end());
+    auto before = movie.TasCopyFrames(static_cast<std::size_t>(start), 0);
+    movie.TasInsertFrames(static_cast<std::size_t>(start), inserted);
+    Record({start, std::move(before),
+            movie.TasCopyFrames(static_cast<std::size_t>(start), inserted.size())});
+    Reload();
+    return true;
+}
+
+bool TasEditorModel::DeleteFrames(int row, int count) {
+    if (count <= 0 || row >= frame_count || !IsEditable(row)) {
+        return false;
+    }
+    count = std::min(count, frame_count - row);
+    auto before =
+        movie.TasCopyFrames(static_cast<std::size_t>(row), static_cast<std::size_t>(count));
+    movie.TasDeleteFrames(static_cast<std::size_t>(row), static_cast<std::size_t>(count));
+    Record({row, std::move(before), movie.TasCopyFrames(static_cast<std::size_t>(row), 0)});
+    Reload();
+    return true;
+}
+
+void TasEditorModel::Reload() {
+    cache.clear();
+    edited_cache.clear();
+    Refresh(-1, -1);
+    if (rows > 0) {
+        emit dataChanged(index(0, 0), index(rows - 1, ColumnCount - 1));
+    }
+}
+
+void TasEditorModel::CheckSession() {
+    const u64 id = movie.TasSessionId();
+    if (id != session_id) {
+        session_id = id;
+        undo_stack.clear();
+        redo_stack.clear();
+        pending_step.clear();
+    }
+}
+
+void TasEditorModel::Record(UndoChange change) {
+    CheckSession();
+    if (step_depth > 0) {
+        pending_step.push_back(std::move(change));
+    } else {
+        PushStep({std::move(change)});
+    }
+}
+
+void TasEditorModel::PushStep(UndoStep step) {
+    undo_stack.push_back(std::move(step));
+    if (undo_stack.size() > MaxUndoSteps) {
+        undo_stack.erase(undo_stack.begin());
+    }
+    redo_stack.clear();
+}
+
+void TasEditorModel::BeginStep() {
+    CheckSession();
+    ++step_depth;
+}
+
+void TasEditorModel::EndStep() {
+    if (step_depth == 0 || --step_depth > 0) {
+        return;
+    }
+    if (!pending_step.empty()) {
+        PushStep(std::move(pending_step));
+        pending_step.clear();
+    }
+}
+
+int TasEditorModel::Undo() {
+    CheckSession();
+    if (undo_stack.empty() || step_depth > 0 || !IsEditable(first_frame)) {
+        return -1;
+    }
+    UndoStep step = std::move(undo_stack.back());
+    undo_stack.pop_back();
+    int first = std::numeric_limits<int>::max();
+    for (auto it = step.rbegin(); it != step.rend(); ++it) {
+        movie.TasReplaceFrames(static_cast<std::size_t>(it->start),
+                               Core::Movie::TasFrameBlockSize(*it->after), *it->before);
+        first = std::min(first, it->start);
+    }
+    redo_stack.push_back(std::move(step));
+    Reload();
+    return first;
+}
+
+int TasEditorModel::Redo() {
+    CheckSession();
+    if (redo_stack.empty() || step_depth > 0 || !IsEditable(first_frame)) {
+        return -1;
+    }
+    UndoStep step = std::move(redo_stack.back());
+    redo_stack.pop_back();
+    int first = std::numeric_limits<int>::max();
+    for (const auto& change : step) {
+        movie.TasReplaceFrames(static_cast<std::size_t>(change.start),
+                               Core::Movie::TasFrameBlockSize(*change.before), *change.after);
+        first = std::min(first, change.start);
+    }
+    undo_stack.push_back(std::move(step));
+    Reload();
+    return first;
+}
+
+bool TasEditorModel::CanUndo() {
+    CheckSession();
+    return !undo_stack.empty();
+}
+
+bool TasEditorModel::CanRedo() {
+    CheckSession();
+    return !redo_stack.empty();
+}
+
+void TasEditorModel::ClearUndo() {
+    undo_stack.clear();
+    redo_stack.clear();
+    pending_step.clear();
+    step_depth = 0;
 }
 
 void TasEditorModel::Refresh(int first_visible, int last_visible) {
@@ -351,7 +508,7 @@ QVariant TasEditorModel::data(const QModelIndex& index, int role) const {
             return QColor(240, 170, 60);
         }
         if (static_cast<u64>(row) == current_frame) {
-            return QColor(90, 140, 240, 140);
+            return CurrentFrameColor;
         }
         if (row < first_frame) {
             return QColor(128, 128, 128, 90);
@@ -506,6 +663,40 @@ Qt::ItemFlags TasEditorModel::flags(const QModelIndex& index) const {
     return flags;
 }
 
+namespace {
+
+/// Draws an outline around the row of the current frame, so it stays visible when selected
+class CurrentFrameDelegate : public QStyledItemDelegate {
+public:
+    CurrentFrameDelegate(TasEditorModel* model_, QObject* parent)
+        : QStyledItemDelegate(parent), model{model_} {}
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override {
+        QStyledItemDelegate::paint(painter, option, index);
+        if (static_cast<u64>(index.row()) != model->CurrentFrame()) {
+            return;
+        }
+        painter->save();
+        painter->setPen(QPen(CurrentFrameOutline, 2));
+        const QRect rect = option.rect.adjusted(0, 1, 0, -1);
+        painter->drawLine(rect.topLeft(), rect.topRight());
+        painter->drawLine(rect.bottomLeft(), rect.bottomRight());
+        if (index.column() == 0) {
+            painter->drawLine(rect.topLeft(), rect.bottomLeft());
+        }
+        if (index.column() == TasEditorModel::ColumnCount - 1) {
+            painter->drawLine(rect.topRight(), rect.bottomRight());
+        }
+        painter->restore();
+    }
+
+private:
+    TasEditorModel* model;
+};
+
+} // namespace
+
 TasEditorWidget::TasEditorWidget(Core::System& system_, QWidget* parent)
     : QDockWidget(tr("TAS Editor"), parent), system{system_} {
     setObjectName(QStringLiteral("TasEditorWidget"));
@@ -543,20 +734,40 @@ TasEditorWidget::TasEditorWidget(Core::System& system_, QWidget* parent)
     state_row->addWidget(new QLabel(tr("Savestate every"), contents));
     interval_spin = new QSpinBox(contents);
     interval_spin->setRange(1, 3600);
-    interval_spin->setValue(60);
+    interval_spin->setValue(static_cast<int>(UISettings::values.tas_state_interval.GetValue()));
     interval_spin->setSuffix(tr(" frames"));
-    connect(interval_spin, &QSpinBox::valueChanged, this,
-            [this](int value) { system.Movie().TasSetStateInterval(static_cast<u32>(value)); });
+    connect(interval_spin, &QSpinBox::valueChanged, this, [this](int value) {
+        UISettings::values.tas_state_interval = static_cast<u32>(value);
+        system.Movie().TasSetStateInterval(static_cast<u32>(value));
+    });
     state_row->addWidget(interval_spin);
     state_row->addWidget(new QLabel(tr("keep at most"), contents));
     capacity_spin = new QSpinBox(contents);
     capacity_spin->setRange(2, 10000);
-    capacity_spin->setValue(60);
+    capacity_spin->setValue(static_cast<int>(UISettings::values.tas_state_capacity.GetValue()));
     capacity_spin->setSuffix(tr(" states"));
-    connect(capacity_spin, &QSpinBox::valueChanged, this,
-            [this](int value) { system.Movie().TasSetStateCapacity(static_cast<u32>(value)); });
+    connect(capacity_spin, &QSpinBox::valueChanged, this, [this](int value) {
+        UISettings::values.tas_state_capacity = static_cast<u32>(value);
+        system.Movie().TasSetStateCapacity(static_cast<u32>(value));
+    });
     state_row->addWidget(capacity_spin);
     state_row->addStretch();
+
+    state_row->addWidget(new QLabel(tr("Go to frame"), contents));
+    goto_spin = new QSpinBox(contents);
+    goto_spin->setRange(0, std::numeric_limits<int>::max());
+    goto_spin->setToolTip(tr("Scrolls to and selects a frame (Ctrl+G). Double click a frame "
+                             "number to make the emulator go to that frame."));
+    state_row->addWidget(goto_spin);
+    auto* goto_button = new QPushButton(tr("Go"), contents);
+    state_row->addWidget(goto_button);
+    connect(goto_button, &QPushButton::clicked, this, [this] { GoToFrame(goto_spin->value()); });
+    connect(goto_spin, &QSpinBox::editingFinished, this, [this] {
+        // Enter in the field (not just leaving it)
+        if (goto_spin->hasFocus()) {
+            GoToFrame(goto_spin->value());
+        }
+    });
     layout->addLayout(state_row);
 
     model = new TasEditorModel(system.Movie(), this);
@@ -564,7 +775,8 @@ TasEditorWidget::TasEditorWidget(Core::System& system_, QWidget* parent)
 
     view = new QTableView(contents);
     view->setModel(model);
-    view->setSelectionBehavior(QAbstractItemView::SelectRows);
+    // Cells are selected individually, rows by clicking or dragging on the frame column
+    view->setSelectionBehavior(QAbstractItemView::SelectItems);
     view->setSelectionMode(QAbstractItemView::ExtendedSelection);
     view->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
     view->verticalHeader()->setVisible(false);
@@ -574,13 +786,9 @@ TasEditorWidget::TasEditorWidget(Core::System& system_, QWidget* parent)
     view->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     view->horizontalHeader()->setMinimumSectionSize(24);
     SizeColumns();
+    view->setItemDelegate(new CurrentFrameDelegate(model, view));
     view->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(view, &QTableView::customContextMenuRequested, this, &TasEditorWidget::ShowContextMenu);
-    connect(view, &QTableView::doubleClicked, this, [this](const QModelIndex& index) {
-        if (index.column() == TasEditorModel::ColumnFrame) {
-            Seek(static_cast<u64>(index.row()));
-        }
-    });
     view->installEventFilter(this);
     view->viewport()->installEventFilter(this);
     layout->addWidget(view, 1);
@@ -589,8 +797,9 @@ TasEditorWidget::TasEditorWidget(Core::System& system_, QWidget* parent)
     layout->addWidget(status_label);
 
     auto* help = new QLabel(
-        tr("Click or drag on buttons to toggle them. Double click a value to type it, or a frame "
-           "number to go to that frame. Right click for copy, paste, insert and delete."),
+        tr("Click or drag on buttons to toggle them, on frame numbers to select frames, and on "
+           "values to select them. Double click a value to type it, or a frame number to go to "
+           "that frame. Right click for copy, paste, insert, delete, clear, undo and redo."),
         contents);
     help->setWordWrap(true);
     layout->addWidget(help);
@@ -643,6 +852,7 @@ void TasEditorWidget::SizeColumns() {
 }
 
 void TasEditorWidget::OnEmulationStarting(EmuThread*) {
+    model->ClearUndo();
     restore_frame.reset();
     save_after_frame.reset();
     system.Movie().TasSetStateInterval(static_cast<u32>(interval_spin->value()));
@@ -651,6 +861,7 @@ void TasEditorWidget::OnEmulationStarting(EmuThread*) {
 }
 
 void TasEditorWidget::OnEmulationStopping() {
+    model->ClearUndo();
     restore_frame.reset();
     save_after_frame.reset();
 }
@@ -668,6 +879,7 @@ void TasEditorWidget::hideEvent(QHideEvent* event) {
 void TasEditorWidget::SetEnabled(bool enabled) {
     auto& movie = system.Movie();
     movie.EnableTasEditor(enabled);
+    model->ClearUndo();
     if (enabled) {
         movie.TasSetStateInterval(static_cast<u32>(interval_spin->value()));
         movie.TasSetStateCapacity(static_cast<u32>(capacity_spin->value()));
@@ -757,10 +969,11 @@ void TasEditorWidget::RestorePosition() {
 
 std::vector<int> TasEditorWidget::SelectedRows() const {
     std::vector<int> rows;
-    for (const auto& index : view->selectionModel()->selectedRows()) {
+    for (const auto& index : view->selectionModel()->selectedIndexes()) {
         rows.push_back(index.row());
     }
     std::sort(rows.begin(), rows.end());
+    rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
     return rows;
 }
 
@@ -769,6 +982,7 @@ void TasEditorWidget::CopySelection() {
     if (rows.empty()) {
         return;
     }
+    // Whole frames are copied, as that is what CTM Studio and pasting work with
     clipboard.clear();
     for (const int row : rows) {
         clipboard.push_back(model->GetFrame(row));
@@ -807,19 +1021,20 @@ void TasEditorWidget::Paste(bool insert) {
     }
     const int start = rows.front();
     if (insert) {
-        if (start > model->FrameCount()) {
-            // Fill the gap before the pasted frames
-            std::vector<TasFrame> gap(static_cast<std::size_t>(start - model->FrameCount()),
-                                      model->BlankFrame());
-            movie.TasInsertFrames(static_cast<std::size_t>(model->FrameCount()), gap);
-        }
-        movie.TasInsertFrames(static_cast<std::size_t>(start), clipboard);
-        model->Refresh(-1, -1);
+        model->InsertFrames(start, clipboard);
     } else {
+        model->BeginStep();
         for (std::size_t i = 0; i < clipboard.size(); ++i) {
             model->SetFrame(start + static_cast<int>(i), clipboard[i]);
         }
+        model->EndStep();
     }
+    // Select the pasted frames
+    const int last = start + static_cast<int>(clipboard.size()) - 1;
+    view->selectionModel()->select(
+        QItemSelection(model->index(start, 0), model->index(std::min(last, model->rowCount() - 1),
+                                                            TasEditorModel::ColumnCount - 1)),
+        QItemSelectionModel::ClearAndSelect);
     OnFramesEdited(start);
 }
 
@@ -829,8 +1044,7 @@ void TasEditorWidget::InsertBlank() {
         return;
     }
     std::vector<TasFrame> frames(rows.size(), model->BlankFrame());
-    system.Movie().TasInsertFrames(static_cast<std::size_t>(rows.front()), frames);
-    model->Refresh(-1, -1);
+    model->InsertFrames(rows.front(), frames);
     OnFramesEdited(rows.front());
 }
 
@@ -839,35 +1053,142 @@ void TasEditorWidget::DeleteFrames() {
     if (rows.empty() || !model->IsEditable(rows.front())) {
         return;
     }
+    model->BeginStep();
     // Delete from the bottom so the indices of the remaining rows stay valid
     for (auto it = rows.rbegin(); it != rows.rend(); ++it) {
         if (*it < model->FrameCount()) {
-            system.Movie().TasDeleteFrames(static_cast<std::size_t>(*it), 1);
+            model->DeleteFrames(*it, 1);
         }
     }
-    model->Refresh(-1, -1);
+    model->EndStep();
     OnFramesEdited(rows.front());
 }
 
-void TasEditorWidget::ClearInputs() {
-    const auto rows = SelectedRows();
-    if (rows.empty() || !model->IsEditable(rows.front())) {
+namespace {
+
+/// Clears all the inputs of a frame, keeping the motion sensors where they were
+TasFrame ClearedFrame(const TasFrame& frame) {
+    TasFrame cleared{};
+    cleared.accel = frame.accel;
+    cleared.gyro = frame.gyro;
+    return cleared;
+}
+
+} // namespace
+
+void TasEditorWidget::ClearSelectedInputs() {
+    std::map<int, std::vector<int>> columns_of_row;
+    for (const auto& index : view->selectionModel()->selectedIndexes()) {
+        columns_of_row[index.row()].push_back(index.column());
+    }
+    if (columns_of_row.empty() || !model->IsEditable(columns_of_row.begin()->first)) {
         return;
     }
-    for (const int row : rows) {
+    model->BeginStep();
+    for (const auto& [row, columns] : columns_of_row) {
         if (row >= model->FrameCount()) {
             break;
         }
         TasFrame frame = model->GetFrame(row);
-        // Keep the motion sensors, clear the controls
-        const auto accel = frame.accel;
-        const auto gyro = frame.gyro;
-        frame = TasFrame{};
-        frame.accel = accel;
-        frame.gyro = gyro;
+        const bool whole_row =
+            static_cast<int>(columns.size()) == TasEditorModel::ColumnCount ||
+            std::find(columns.begin(), columns.end(), TasEditorModel::ColumnFrame) != columns.end();
+        if (whole_row) {
+            frame = ClearedFrame(frame);
+        } else {
+            for (const int column : columns) {
+                if (TasEditorModel::IsButtonColumn(column)) {
+                    TasEditorModel::SetButton(frame, column, false);
+                    continue;
+                }
+                switch (column) {
+                case TasEditorModel::ColumnCircleX:
+                    frame.circle_x = 0;
+                    break;
+                case TasEditorModel::ColumnCircleY:
+                    frame.circle_y = 0;
+                    break;
+                case TasEditorModel::ColumnCStickX:
+                    frame.c_stick_x = 0;
+                    break;
+                case TasEditorModel::ColumnCStickY:
+                    frame.c_stick_y = 0;
+                    break;
+                case TasEditorModel::ColumnTouch:
+                    frame.touch = false;
+                    frame.touch_x = 0;
+                    frame.touch_y = 0;
+                    break;
+                case TasEditorModel::ColumnAccel:
+                    frame.accel = {};
+                    break;
+                case TasEditorModel::ColumnGyro:
+                    frame.gyro = {};
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
         model->SetFrame(row, frame);
     }
+    model->EndStep();
+    OnFramesEdited(columns_of_row.begin()->first);
+}
+
+void TasEditorWidget::ClearFrames() {
+    const auto rows = SelectedRows();
+    if (rows.empty() || !model->IsEditable(rows.front())) {
+        return;
+    }
+    model->BeginStep();
+    for (const int row : rows) {
+        if (row >= model->FrameCount()) {
+            break;
+        }
+        model->SetFrame(row, ClearedFrame(model->GetFrame(row)));
+    }
+    model->EndStep();
     OnFramesEdited(rows.front());
+}
+
+void TasEditorWidget::Undo() {
+    const int row = model->Undo();
+    if (row >= 0) {
+        OnFramesEdited(row);
+    }
+}
+
+void TasEditorWidget::Redo() {
+    const int row = model->Redo();
+    if (row >= 0) {
+        OnFramesEdited(row);
+    }
+}
+
+void TasEditorWidget::GoToFrame(int frame) {
+    model->Refresh(-1, -1);
+    const int row = std::clamp(frame, 0, model->rowCount() - 1);
+    const QModelIndex index = model->index(row, TasEditorModel::ColumnFrame);
+    view->selectionModel()->setCurrentIndex(index, QItemSelectionModel::ClearAndSelect |
+                                                       QItemSelectionModel::Rows);
+    view->scrollTo(index, QAbstractItemView::PositionAtCenter);
+    row_anchor = row;
+    view->setFocus(Qt::OtherFocusReason);
+}
+
+void TasEditorWidget::SelectRowRange(int row) {
+    row = std::clamp(row, 0, model->rowCount() - 1);
+    const int first = std::min(row_anchor, row);
+    const int last = std::max(row_anchor, row);
+    QItemSelection selection = row_drag_base;
+    selection.merge(
+        QItemSelection(model->index(first, 0), model->index(last, TasEditorModel::ColumnCount - 1)),
+        QItemSelectionModel::Select);
+    auto* selection_model = view->selectionModel();
+    selection_model->select(selection, QItemSelectionModel::ClearAndSelect);
+    selection_model->setCurrentIndex(model->index(row, TasEditorModel::ColumnFrame),
+                                     QItemSelectionModel::NoUpdate);
 }
 
 void TasEditorWidget::SaveMovie() {
@@ -902,6 +1223,9 @@ void TasEditorWidget::ShowContextMenu(const QPoint& pos) {
                        [this, row = index.row()] { Seek(static_cast<u64>(row)); });
         menu.addSeparator();
     }
+    menu.addAction(tr("Undo\tCtrl+Z"), this, &TasEditorWidget::Undo)->setEnabled(model->CanUndo());
+    menu.addAction(tr("Redo\tCtrl+Y"), this, &TasEditorWidget::Redo)->setEnabled(model->CanRedo());
+    menu.addSeparator();
     menu.addAction(tr("Copy\tCtrl+C"), this, &TasEditorWidget::CopySelection);
     const bool can_paste =
         !clipboard.empty() || FramesFromJson(QApplication::clipboard()->text()).has_value();
@@ -911,7 +1235,9 @@ void TasEditorWidget::ShowContextMenu(const QPoint& pos) {
     menu.addSeparator();
     menu.addAction(tr("Insert Blank Frames\tInsert"), this, &TasEditorWidget::InsertBlank);
     menu.addAction(tr("Delete Frames\tCtrl+Delete"), this, &TasEditorWidget::DeleteFrames);
-    menu.addAction(tr("Clear Inputs\tDelete"), this, &TasEditorWidget::ClearInputs);
+    menu.addAction(tr("Clear Selected Inputs\tDelete"), this,
+                   &TasEditorWidget::ClearSelectedInputs);
+    menu.addAction(tr("Clear Frames\tShift+Delete"), this, &TasEditorWidget::ClearFrames);
     menu.exec(view->viewport()->mapToGlobal(pos));
 }
 
@@ -922,20 +1248,34 @@ bool TasEditorWidget::eventFilter(QObject* object, QEvent* event) {
         (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress)) {
         auto* key_event = static_cast<QKeyEvent*>(event);
         const auto combination = key_event->keyCombination();
+        const auto is = [&combination](Qt::KeyboardModifiers modifiers, Qt::Key key) {
+            return combination == QKeyCombination(modifiers, key);
+        };
         std::function<void()> action;
-        if (combination == QKeyCombination(Qt::ControlModifier, Qt::Key_C)) {
+        if (is(Qt::ControlModifier, Qt::Key_C)) {
             action = [this] { CopySelection(); };
-        } else if (combination == QKeyCombination(Qt::ControlModifier, Qt::Key_V)) {
+        } else if (is(Qt::ControlModifier, Qt::Key_V)) {
             action = [this] { Paste(false); };
-        } else if (combination ==
-                   QKeyCombination(Qt::ControlModifier | Qt::ShiftModifier, Qt::Key_V)) {
+        } else if (is(Qt::ControlModifier | Qt::ShiftModifier, Qt::Key_V)) {
             action = [this] { Paste(true); };
-        } else if (combination == QKeyCombination(Qt::Key_Insert)) {
+        } else if (is(Qt::ControlModifier, Qt::Key_Z)) {
+            action = [this] { Undo(); };
+        } else if (is(Qt::ControlModifier, Qt::Key_Y) ||
+                   is(Qt::ControlModifier | Qt::ShiftModifier, Qt::Key_Z)) {
+            action = [this] { Redo(); };
+        } else if (is(Qt::ControlModifier, Qt::Key_G)) {
+            action = [this] {
+                goto_spin->setFocus(Qt::ShortcutFocusReason);
+                goto_spin->selectAll();
+            };
+        } else if (is(Qt::NoModifier, Qt::Key_Insert)) {
             action = [this] { InsertBlank(); };
-        } else if (combination == QKeyCombination(Qt::ControlModifier, Qt::Key_Delete)) {
+        } else if (is(Qt::ControlModifier, Qt::Key_Delete)) {
             action = [this] { DeleteFrames(); };
-        } else if (combination == QKeyCombination(Qt::Key_Delete)) {
-            action = [this] { ClearInputs(); };
+        } else if (is(Qt::ShiftModifier, Qt::Key_Delete)) {
+            action = [this] { ClearFrames(); };
+        } else if (is(Qt::NoModifier, Qt::Key_Delete)) {
+            action = [this] { ClearSelectedInputs(); };
         }
         const bool editing = view->indexWidget(view->currentIndex()) != nullptr;
         if (action && !editing) {
@@ -948,47 +1288,107 @@ bool TasEditorWidget::eventFilter(QObject* object, QEvent* event) {
         }
     }
 
-    // Toggling and drawing buttons with the mouse
-    if (object == view->viewport()) {
-        auto* mouse_event = static_cast<QMouseEvent*>(event);
-        if (event->type() == QEvent::MouseButtonPress && mouse_event->button() == Qt::LeftButton &&
-            mouse_event->modifiers() == Qt::NoModifier) {
-            const QModelIndex index = view->indexAt(mouse_event->position().toPoint());
-            if (index.isValid() && TasEditorModel::IsButtonColumn(index.column()) &&
-                model->IsEditable(index.row())) {
-                // The click is not passed to the table, select the row and take the focus here so
-                // the keyboard shortcuts (e.g. paste) apply to it
-                view->setFocus(Qt::MouseFocusReason);
-                view->selectionModel()->setCurrentIndex(index, QItemSelectionModel::ClearAndSelect |
-                                                                   QItemSelectionModel::Rows);
-                TasFrame frame = model->GetFrame(index.row());
-                draw_value = !TasEditorModel::GetButton(frame, index.column());
-                TasEditorModel::SetButton(frame, index.column(), draw_value);
-                model->SetFrame(index.row(), frame);
-                drawing = true;
-                draw_column = index.column();
-                draw_last_row = index.row();
-                draw_first_row = index.row();
+    if (object != view->viewport()) {
+        return QDockWidget::eventFilter(object, event);
+    }
+    const auto type = event->type();
+    if (type != QEvent::MouseButtonPress && type != QEvent::MouseButtonDblClick &&
+        type != QEvent::MouseMove && type != QEvent::MouseButtonRelease) {
+        return QDockWidget::eventFilter(object, event);
+    }
+    auto* mouse_event = static_cast<QMouseEvent*>(event);
+    const QPoint pos = mouse_event->position().toPoint();
+
+    if ((type == QEvent::MouseButtonPress || type == QEvent::MouseButtonDblClick) &&
+        mouse_event->button() == Qt::LeftButton) {
+        const QModelIndex index = view->indexAt(pos);
+        if (!index.isValid()) {
+            return QDockWidget::eventFilter(object, event);
+        }
+
+        // Frame column: select whole rows, double click goes to the frame
+        if (index.column() == TasEditorModel::ColumnFrame) {
+            if (type == QEvent::MouseButtonDblClick) {
+                Seek(static_cast<u64>(index.row()));
                 return true;
             }
-        } else if (event->type() == QEvent::MouseMove && drawing) {
-            const int row = view->rowAt(static_cast<int>(mouse_event->position().y()));
-            if (row >= 0 && row != draw_last_row) {
-                const int step = row > draw_last_row ? 1 : -1;
-                for (int r = draw_last_row + step; r != row + step; r += step) {
-                    if (!model->IsEditable(r)) {
-                        continue;
-                    }
-                    TasFrame frame = model->GetFrame(r);
-                    TasEditorModel::SetButton(frame, draw_column, draw_value);
-                    model->SetFrame(r, frame);
-                    draw_first_row = std::min(draw_first_row, r);
-                }
-                draw_last_row = row;
+            view->setFocus(Qt::MouseFocusReason);
+            const auto modifiers = mouse_event->modifiers();
+            if (!(modifiers & Qt::ShiftModifier) || row_anchor < 0) {
+                row_anchor = index.row();
             }
+            row_drag_base = (modifiers & Qt::ControlModifier) ? view->selectionModel()->selection()
+                                                              : QItemSelection{};
+            SelectRowRange(index.row());
+            row_dragging = true;
             return true;
-        } else if (event->type() == QEvent::MouseButtonRelease && drawing) {
+        }
+
+        // Button columns: toggle the button, dragging sets the other frames the same way
+        if (TasEditorModel::IsButtonColumn(index.column()) &&
+            mouse_event->modifiers() == Qt::NoModifier && model->IsEditable(index.row())) {
+            // The click is not passed to the table, select the cell and take the focus here so
+            // the keyboard shortcuts (e.g. paste) apply to it
+            view->setFocus(Qt::MouseFocusReason);
+            view->selectionModel()->setCurrentIndex(index, QItemSelectionModel::ClearAndSelect);
+            row_anchor = index.row();
+            TasFrame frame = model->GetFrame(index.row());
+            draw_value = !TasEditorModel::GetButton(frame, index.column());
+            TasEditorModel::SetButton(frame, index.column(), draw_value);
+            model->BeginStep();
+            model->SetFrame(index.row(), frame);
+            drawing = true;
+            draw_column = index.column();
+            draw_last_row = index.row();
+            draw_first_row = index.row();
+            return true;
+        }
+        // Value columns: normal cell selection
+        row_anchor = index.row();
+        return QDockWidget::eventFilter(object, event);
+    }
+
+    if (type == QEvent::MouseMove && (drawing || row_dragging)) {
+        // Scroll when dragging past the top or bottom
+        auto* scroll_bar = view->verticalScrollBar();
+        if (pos.y() < 0) {
+            scroll_bar->setValue(scroll_bar->value() - 1);
+        } else if (pos.y() >= view->viewport()->height()) {
+            scroll_bar->setValue(scroll_bar->value() + 1);
+        }
+        const int y = std::clamp(pos.y(), 0, view->viewport()->height() - 1);
+        const int row = view->rowAt(y);
+        if (row < 0) {
+            return true;
+        }
+        if (row_dragging) {
+            SelectRowRange(row);
+            return true;
+        }
+        if (row != draw_last_row) {
+            const int step = row > draw_last_row ? 1 : -1;
+            for (int r = draw_last_row + step; r != row + step; r += step) {
+                if (!model->IsEditable(r)) {
+                    continue;
+                }
+                TasFrame frame = model->GetFrame(r);
+                TasEditorModel::SetButton(frame, draw_column, draw_value);
+                model->SetFrame(r, frame);
+                draw_first_row = std::min(draw_first_row, r);
+            }
+            draw_last_row = row;
+        }
+        return true;
+    }
+
+    if (type == QEvent::MouseButtonRelease && mouse_event->button() == Qt::LeftButton) {
+        if (row_dragging) {
+            row_dragging = false;
+            return true;
+        }
+        if (drawing) {
             drawing = false;
+            model->EndStep();
             OnFramesEdited(draw_first_row);
             return true;
         }

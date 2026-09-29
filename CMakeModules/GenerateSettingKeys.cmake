@@ -234,6 +234,8 @@ if (ENABLE_QT)
         "confirmClose"
         "saveStateWarning"
         "movieDeleteSaveData"
+        "tasStateInterval"
+        "tasStateCapacity"
         "firstStart"
         "pauseWhenInBackground"
         "muteWhenInBackground"

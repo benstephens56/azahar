@@ -4,11 +4,14 @@
 
 #pragma once
 
+#include <memory>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <QAbstractTableModel>
 #include <QDockWidget>
+#include <QItemSelection>
 #include <QTimer>
 #include "core/movie.h"
 
@@ -77,6 +80,21 @@ public:
     /// Sets the inputs of a frame, appending frames up to it if needed. Returns false if the frame
     /// can't be edited.
     bool SetFrame(int row, const Core::Movie::TasFrame& frame);
+    /// Inserts frames before a row, filling the gap with blank frames if the row is past the end
+    bool InsertFrames(int row, const std::vector<Core::Movie::TasFrame>& frames);
+    bool DeleteFrames(int row, int count);
+    /// Clears the cached frames and repaints the whole table
+    void Reload();
+
+    // Undo and redo. Edits made between BeginStep and EndStep are undone together.
+    void BeginStep();
+    void EndStep();
+    /// Returns the first row changed, or -1 if there was nothing to undo or redo
+    int Undo();
+    int Redo();
+    bool CanUndo();
+    bool CanRedo();
+    void ClearUndo();
     /// Frame to use for new frames (neutral inputs, motion copied from the last frame)
     Core::Movie::TasFrame BlankFrame() const;
     bool IsEditable(int row) const;
@@ -93,7 +111,26 @@ signals:
     void FramesEdited(int first_row);
 
 private:
+    struct UndoChange {
+        int start;
+        std::shared_ptr<const Core::Movie::TasFrameBlock> before;
+        std::shared_ptr<const Core::Movie::TasFrameBlock> after;
+    };
+    using UndoStep = std::vector<UndoChange>;
+    static constexpr std::size_t MaxUndoSteps = 1000;
+
+    void Record(UndoChange change);
+    void PushStep(UndoStep step);
+    /// Forgets the undo history if the frames of the editor were recreated
+    void CheckSession();
+
     Core::Movie& movie;
+    std::vector<UndoStep> undo_stack;
+    std::vector<UndoStep> redo_stack;
+    UndoStep pending_step;
+    int step_depth = 0;
+    u64 session_id = 0;
+
     int frame_count = 0;
     int first_frame = 0;
     u64 current_frame = 0;
@@ -135,12 +172,22 @@ private:
     /// Sets the widths of the columns to fit the widest values they can have
     void SizeColumns();
 
+    /// Rows with at least one selected cell
     std::vector<int> SelectedRows() const;
     void CopySelection();
     void Paste(bool insert);
     void InsertBlank();
     void DeleteFrames();
-    void ClearInputs();
+    /// Clears the inputs of the selected cells (the whole frame for fully selected rows)
+    void ClearSelectedInputs();
+    /// Clears all the inputs of the frames with a selected cell
+    void ClearFrames();
+    void Undo();
+    void Redo();
+    void GoToFrame(int frame);
+    /// Selects the rows between the drag anchor and `row`, keeping the selection the drag started
+    /// with
+    void SelectRowRange(int row);
     void SaveMovie();
     void ShowContextMenu(const QPoint& pos);
 
@@ -152,6 +199,7 @@ private:
     QCheckBox* overwrite_check;
     QSpinBox* interval_spin;
     QSpinBox* capacity_spin;
+    QSpinBox* goto_spin;
     QLabel* status_label;
     QPushButton* save_button;
     QTimer refresh_timer;
@@ -170,6 +218,11 @@ private:
     int draw_last_row = -1;
     bool draw_value = false;
     int draw_first_row = -1;
+
+    // Selecting rows by clicking or dragging on the frame column
+    bool row_dragging = false;
+    int row_anchor = -1;
+    QItemSelection row_drag_base;
 
     u64 last_current_frame = 0;
 };

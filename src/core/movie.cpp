@@ -637,6 +637,7 @@ void Movie::StartPlayback(const std::string& movie_file) {
                 // speed chosen by the user
                 std::scoped_lock lock{tas_mutex};
                 tas = std::make_unique<TasData>();
+                ++tas_session_id;
             }
 
             LOG_INFO(Movie, "Loaded Movie, ID: {:016X}", id);
@@ -656,6 +657,7 @@ void Movie::StartRecording(const std::string& movie_file, const std::string& aut
     if (tas) {
         std::scoped_lock lock{tas_mutex};
         tas = std::make_unique<TasData>();
+        ++tas_session_id;
         read_only = false;
     }
 
@@ -769,6 +771,7 @@ void Movie::Shutdown() {
     if (tas) {
         std::scoped_lock lock{tas_mutex};
         tas = std::make_unique<TasData>();
+        ++tas_session_id;
     }
     recorded_input.resize(0);
     record_movie_file.clear();
@@ -850,6 +853,7 @@ void Movie::EnableTasEditor(bool enable) {
         return;
     }
     tas = std::make_unique<TasData>();
+    ++tas_session_id;
     read_only = false;
     if (play_mode == PlayMode::Recording || play_mode == PlayMode::Playing) {
         // Frames emulated before now are not known
@@ -1142,6 +1146,40 @@ void Movie::TasDeleteFrames(std::size_t index, std::size_t count) {
     count = std::min(count, tas->frames.size() - index);
     tas->frames.erase(tas->frames.begin() + index, tas->frames.begin() + index + count);
     TasInvalidateStatesFrom(index);
+}
+
+struct Movie::TasFrameBlock {
+    std::vector<TasData::Frame> frames;
+};
+
+std::shared_ptr<const Movie::TasFrameBlock> Movie::TasCopyFrames(std::size_t index,
+                                                                 std::size_t count) const {
+    std::scoped_lock lock{tas_mutex};
+    auto block = std::make_shared<TasFrameBlock>();
+    if (tas && index < tas->frames.size()) {
+        count = std::min(count, tas->frames.size() - index);
+        block->frames.assign(tas->frames.begin() + index, tas->frames.begin() + index + count);
+    }
+    return block;
+}
+
+std::size_t Movie::TasFrameBlockSize(const TasFrameBlock& block) {
+    return block.frames.size();
+}
+
+void Movie::TasReplaceFrames(std::size_t index, std::size_t count, const TasFrameBlock& block) {
+    std::scoped_lock lock{tas_mutex};
+    if (!tas || index < tas->first_frame || index > tas->frames.size()) {
+        return;
+    }
+    count = std::min(count, tas->frames.size() - index);
+    tas->frames.erase(tas->frames.begin() + index, tas->frames.begin() + index + count);
+    tas->frames.insert(tas->frames.begin() + index, block.frames.begin(), block.frames.end());
+    TasInvalidateStatesFrom(index);
+}
+
+u64 Movie::TasSessionId() const {
+    return tas_session_id;
 }
 
 u64 Movie::TasCurrentFrame() const {

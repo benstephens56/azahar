@@ -888,6 +888,8 @@ void QtConfig::ReadUIValues() {
         ReadBasicSetting(UISettings::values.confirm_before_closing);
         ReadBasicSetting(UISettings::values.save_state_warning);
         ReadBasicSetting(UISettings::values.movie_delete_save_data);
+        ReadBasicSetting(UISettings::values.tas_state_interval);
+        ReadBasicSetting(UISettings::values.tas_state_capacity);
         ReadBasicSetting(UISettings::values.first_start);
         ReadBasicSetting(UISettings::values.callout_flags);
         ReadBasicSetting(UISettings::values.show_console);
@@ -1425,6 +1427,8 @@ void QtConfig::SaveUIValues() {
         WriteBasicSetting(UISettings::values.confirm_before_closing);
         WriteBasicSetting(UISettings::values.save_state_warning);
         WriteBasicSetting(UISettings::values.movie_delete_save_data);
+        WriteBasicSetting(UISettings::values.tas_state_interval);
+        WriteBasicSetting(UISettings::values.tas_state_capacity);
         WriteBasicSetting(UISettings::values.first_start);
         WriteBasicSetting(UISettings::values.callout_flags);
         WriteBasicSetting(UISettings::values.show_console);

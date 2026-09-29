@@ -5,6 +5,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <functional>
 #include <future>
 #include <map>
@@ -201,6 +202,15 @@ public:
     void TasInsertFrames(std::size_t index, const std::vector<TasFrame>& frames);
     void TasDeleteFrames(std::size_t index, std::size_t count);
 
+    /// Frames of the TAS editor with all their data (for undo)
+    struct TasFrameBlock;
+    std::shared_ptr<const TasFrameBlock> TasCopyFrames(std::size_t index, std::size_t count) const;
+    static std::size_t TasFrameBlockSize(const TasFrameBlock& block);
+    /// Replaces `count` frames at `index` with the frames of the block
+    void TasReplaceFrames(std::size_t index, std::size_t count, const TasFrameBlock& block);
+    /// Changes whenever the frames of the TAS editor are recreated (e.g. a movie is started)
+    u64 TasSessionId() const;
+
     /// Frame the emulator is at, i.e. the next frame to be emulated
     u64 TasCurrentFrame() const;
     /// Whether a savestate of the given frame is kept
@@ -268,6 +278,7 @@ private:
     /// Ticks at the start of the movie, used when the movie has no base ticks
     s64 tas_origin_ticks = 0;
     mutable std::mutex tas_mutex;
+    std::atomic<u64> tas_session_id{0};
 
     Core::System& system;
     PlayMode play_mode;
