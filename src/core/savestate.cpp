@@ -14,6 +14,7 @@
 #include "common/file_util.h"
 #include "common/logging/log.h"
 #include "common/scm_rev.h"
+#include "common/scope_exit.h"
 #include "common/swap.h"
 #include "common/zstd_compression.h"
 #include "core/core.h"
@@ -157,9 +158,14 @@ void System::SaveState(u32 slot) const {
     }
 
     std::ostringstream sstream{std::ios_base::binary};
-    // Serialize
-    oarchive oa{sstream};
-    oa&* this;
+    {
+        // Savestates of the user keep the frames of the TAS editor (see Movie::serialize)
+        movie.SetSaveTasFrames(true);
+        SCOPE_EXIT({ movie.SetSaveTasFrames(false); });
+        // Serialize
+        oarchive oa{sstream};
+        oa&* this;
+    }
 
     const std::string& str{sstream.str()};
     const auto data = std::span<const u8>{reinterpret_cast<const u8*>(str.data()), str.size()};

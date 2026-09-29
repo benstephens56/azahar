@@ -211,6 +211,17 @@ public:
     /// Changes whenever the frames of the TAS editor are recreated (e.g. a movie is started)
     u64 TasSessionId() const;
 
+    /// Makes the next savestates keep the frames of the TAS editor, so that loading them goes back
+    /// to the inputs they were made with (for the savestates of the user, not those of the editor)
+    void SetSaveTasFrames(bool save) const;
+    /// Incremented whenever loading a savestate replaced the frames of the TAS editor
+    u64 TasFramesLoadCount() const;
+    /// The frames of the TAS editor before and after the last savestate load that replaced them,
+    /// as whole tables (to undo it). Returns nullopt if there is none.
+    std::optional<
+        std::pair<std::shared_ptr<const TasFrameBlock>, std::shared_ptr<const TasFrameBlock>>>
+    TasTakeFramesLoadUndo();
+
     /// Frame the emulator is at, i.e. the next frame to be emulated
     u64 TasCurrentFrame() const;
     /// Whether a savestate of the given frame is kept
@@ -279,6 +290,16 @@ private:
     s64 tas_origin_ticks = 0;
     mutable std::mutex tas_mutex;
     std::atomic<u64> tas_session_id{0};
+    mutable bool save_tas_frames = false;
+    std::atomic<u64> tas_frames_load_count{0};
+    std::shared_ptr<const TasFrameBlock> tas_frames_before_load;
+    std::shared_ptr<const TasFrameBlock> tas_frames_after_load;
+
+    std::vector<u8> TasEncodeFrames() const;
+    void TasLoadFrames(std::span<const u8> encoded);
+    /// Replaces the whole table (a block made by TasCopyAllFrames). Expects tas_mutex locked.
+    void TasSetAllFrames(const TasFrameBlock& block);
+    std::shared_ptr<const TasFrameBlock> TasCopyAllFrames() const;
 
     Core::System& system;
     PlayMode play_mode;

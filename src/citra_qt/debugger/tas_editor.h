@@ -109,6 +109,8 @@ public:
 signals:
     /// Emitted after the user changed the inputs of a frame
     void FramesEdited(int first_row);
+    /// Emitted when loading a savestate replaced the frames with the ones it was made with
+    void FramesLoaded();
 
 private:
     struct UndoChange {
@@ -130,6 +132,7 @@ private:
     UndoStep pending_step;
     int step_depth = 0;
     u64 session_id = 0;
+    u64 frames_load_count = 0;
 
     int frame_count = 0;
     int first_frame = 0;
@@ -225,4 +228,8 @@ private:
     QItemSelection row_drag_base;
 
     u64 last_current_frame = 0;
+
+    /// Message shown in the status line for a while instead of the status
+    QString notice;
+    QTimer notice_timer;
 };

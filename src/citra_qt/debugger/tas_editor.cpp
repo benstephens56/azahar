@@ -321,6 +321,8 @@ void TasEditorModel::CheckSession() {
         undo_stack.clear();
         redo_stack.clear();
         pending_step.clear();
+        frames_load_count = movie.TasFramesLoadCount();
+        movie.TasTakeFramesLoadUndo();
     }
 }
 
@@ -410,6 +412,19 @@ void TasEditorModel::ClearUndo() {
 }
 
 void TasEditorModel::Refresh(int first_visible, int last_visible) {
+    // Loading a savestate of the user replaced the frames with the ones it was made with, which
+    // can be undone
+    CheckSession();
+    if (const u64 loads = movie.TasFramesLoadCount(); loads != frames_load_count) {
+        frames_load_count = loads;
+        if (auto undo = movie.TasTakeFramesLoadUndo()) {
+            PushStep({UndoChange{0, std::move(undo->first), std::move(undo->second)}});
+        }
+        cache.clear();
+        edited_cache.clear();
+        emit FramesLoaded();
+    }
+
     const int new_count = static_cast<int>(movie.TasFrameCount());
     const int old_first_frame = first_frame;
     const u64 old_current_frame = current_frame;
@@ -806,6 +821,14 @@ TasEditorWidget::TasEditorWidget(Core::System& system_, QWidget* parent)
 
     setWidget(contents);
 
+    notice_timer.setSingleShot(true);
+    notice_timer.setInterval(6000);
+    connect(&notice_timer, &QTimer::timeout, this, [this] { notice.clear(); });
+    connect(model, &TasEditorModel::FramesLoaded, this, [this] {
+        notice = tr("Loaded the inputs the savestate was made with (Ctrl+Z to undo).");
+        notice_timer.start();
+    });
+
     refresh_timer.setInterval(50);
     connect(&refresh_timer, &QTimer::timeout, this, &TasEditorWidget::Refresh);
     restore_timer.setSingleShot(true);
@@ -926,7 +949,7 @@ void TasEditorWidget::Refresh() {
                      .arg(movie.TasStateMemoryUsage() / (1024 * 1024))
                      .arg(movie.TasIsSeeking() ? tr(" | Seeking...") : QString{});
     }
-    status_label->setText(status);
+    status_label->setText(notice.isEmpty() ? status : notice);
     save_button->setEnabled(movie.IsTasEditorEnabled() &&
                             movie.GetPlayMode() == Core::Movie::PlayMode::Recording);
 }

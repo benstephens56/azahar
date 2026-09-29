@@ -9,6 +9,8 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 #include <boost/optional.hpp>
 #include <cryptopp/hex.h>
@@ -251,6 +253,23 @@ void Movie::serialize(Archive& ar, const unsigned int file_version) {
         // state is from the TAS editor, otherwise start the frame over
         std::scoped_lock lock{tas_mutex};
         tas->ResetPosition();
+    }
+
+    // Savestates made by the user also keep the frames of the TAS editor, so that loading one goes
+    // back to the inputs it was made with, even if frames before it were edited since (like a
+    // branch in BizHawk's TAStudio). The savestates of the editor itself don't, as loading them
+    // must keep the current frames.
+    bool has_tas_frames = save_tas_frames && tas;
+    ar & has_tas_frames;
+    if (has_tas_frames) {
+        std::vector<u8> tas_frames;
+        if (!Archive::is_loading::value) {
+            tas_frames = TasEncodeFrames();
+        }
+        ar & tas_frames;
+        if (Archive::is_loading::value && tas && !read_only && id != 0) {
+            TasLoadFrames(tas_frames);
+        }
     }
 
     // Whether the state was made in MovieFinished state
@@ -1150,7 +1169,149 @@ void Movie::TasDeleteFrames(std::size_t index, std::size_t count) {
 
 struct Movie::TasFrameBlock {
     std::vector<TasData::Frame> frames;
+    /// Set for a block holding the whole table
+    std::optional<u64> first_frame;
 };
+
+namespace {
+
+bool SameFrame(const auto& a, const auto& b) {
+    return a.known == b.known && a.edited == b.edited && a.seen == b.seen && a.values == b.values &&
+           a.polls.size() == b.polls.size() &&
+           std::memcmp(a.polls.data(), b.polls.data(), a.polls.size() * sizeof(ControllerState)) ==
+               0;
+}
+
+/// First frame that differs between two tables
+std::size_t FirstDifference(const auto& a, const auto& b) {
+    const std::size_t count = std::min(a.size(), b.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        if (!SameFrame(a[i], b[i])) {
+            return i;
+        }
+    }
+    return count;
+}
+
+} // namespace
+
+std::shared_ptr<const Movie::TasFrameBlock> Movie::TasCopyAllFrames() const {
+    auto block = std::make_shared<TasFrameBlock>();
+    if (tas) {
+        block->frames = tas->frames;
+        block->first_frame = tas->first_frame;
+    }
+    return block;
+}
+
+void Movie::TasSetAllFrames(const TasFrameBlock& block) {
+    if (!tas) {
+        return;
+    }
+    // Keep the savestates of the editor up to the first frame that changes
+    const std::size_t first_change =
+        block.first_frame == tas->first_frame ? FirstDifference(tas->frames, block.frames) : 0;
+    tas->frames = block.frames;
+    tas->first_frame = block.first_frame.value_or(tas->first_frame);
+    TasInvalidateStatesFrom(first_change);
+}
+
+std::vector<u8> Movie::TasEncodeFrames() const {
+    static_assert(std::is_trivially_copyable_v<TasFrame>);
+    std::scoped_lock lock{tas_mutex};
+    std::vector<u8> out;
+    const auto append = [&out](const void* data, std::size_t size) {
+        const auto* bytes = static_cast<const u8*>(data);
+        out.insert(out.end(), bytes, bytes + size);
+    };
+    if (!tas) {
+        return out;
+    }
+    const u64 first_frame = tas->first_frame;
+    const u64 count = tas->frames.size();
+    append(&first_frame, sizeof(first_frame));
+    append(&count, sizeof(count));
+    for (const auto& frame : tas->frames) {
+        const std::array<u8, 3> flags{static_cast<u8>(frame.known), frame.edited, frame.seen};
+        append(flags.data(), flags.size());
+        append(&frame.values, sizeof(frame.values));
+        const u32 polls = static_cast<u32>(frame.polls.size());
+        append(&polls, sizeof(polls));
+        append(frame.polls.data(), frame.polls.size() * sizeof(ControllerState));
+    }
+    return out;
+}
+
+void Movie::TasLoadFrames(std::span<const u8> encoded) {
+    std::size_t offset = 0;
+    const auto read = [&](void* data, std::size_t size) {
+        if (offset + size > encoded.size()) {
+            throw std::runtime_error("Invalid TAS editor frames in savestate");
+        }
+        std::memcpy(data, encoded.data() + offset, size);
+        offset += size;
+    };
+    auto block = std::make_shared<TasFrameBlock>();
+    u64 first_frame = 0;
+    u64 count = 0;
+    read(&first_frame, sizeof(first_frame));
+    read(&count, sizeof(count));
+    constexpr std::size_t MinFrameSize = 3 + sizeof(TasFrame) + sizeof(u32);
+    if (count > (encoded.size() - offset) / MinFrameSize) {
+        throw std::runtime_error("Invalid TAS editor frames in savestate");
+    }
+    block->first_frame = first_frame;
+    block->frames.resize(count);
+    for (auto& frame : block->frames) {
+        std::array<u8, 3> flags{};
+        read(flags.data(), flags.size());
+        frame.known = flags[0] != 0;
+        frame.edited = flags[1];
+        frame.seen = flags[2];
+        read(&frame.values, sizeof(frame.values));
+        u32 polls = 0;
+        read(&polls, sizeof(polls));
+        if (polls > (encoded.size() - offset) / sizeof(ControllerState)) {
+            throw std::runtime_error("Invalid TAS editor frames in savestate");
+        }
+        frame.polls.resize(polls, ControllerState{});
+        read(frame.polls.data(), frame.polls.size() * sizeof(ControllerState));
+    }
+
+    std::scoped_lock lock{tas_mutex};
+    if (!tas) {
+        return;
+    }
+    if (tas->first_frame == first_frame && tas->frames.size() == block->frames.size() &&
+        FirstDifference(tas->frames, block->frames) == block->frames.size()) {
+        // Same inputs, nothing to replace
+        return;
+    }
+    auto before = TasCopyAllFrames();
+    TasSetAllFrames(*block);
+    tas_frames_before_load = std::move(before);
+    tas_frames_after_load = std::move(block);
+    ++tas_frames_load_count;
+}
+
+void Movie::SetSaveTasFrames(bool save) const {
+    save_tas_frames = save;
+}
+
+u64 Movie::TasFramesLoadCount() const {
+    return tas_frames_load_count;
+}
+
+std::optional<std::pair<std::shared_ptr<const Movie::TasFrameBlock>,
+                        std::shared_ptr<const Movie::TasFrameBlock>>>
+Movie::TasTakeFramesLoadUndo() {
+    std::scoped_lock lock{tas_mutex};
+    if (!tas_frames_before_load || !tas_frames_after_load) {
+        return std::nullopt;
+    }
+    return std::make_pair(std::exchange(tas_frames_before_load, nullptr),
+                          std::exchange(tas_frames_after_load, nullptr));
+}
 
 std::shared_ptr<const Movie::TasFrameBlock> Movie::TasCopyFrames(std::size_t index,
                                                                  std::size_t count) const {
@@ -1169,6 +1330,11 @@ std::size_t Movie::TasFrameBlockSize(const TasFrameBlock& block) {
 
 void Movie::TasReplaceFrames(std::size_t index, std::size_t count, const TasFrameBlock& block) {
     std::scoped_lock lock{tas_mutex};
+    if (tas && block.first_frame) {
+        // Whole table
+        TasSetAllFrames(block);
+        return;
+    }
     if (!tas || index < tas->first_frame || index > tas->frames.size()) {
         return;
     }
