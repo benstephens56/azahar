@@ -39,6 +39,11 @@ constexpr VAddr OffsetPrevPos = 0x108;
 
 constexpr u16 BgCheckGround = 0x0001;
 
+// The floor check casts its ray down from this far above the actor's previous Y (func_8002E2AC in
+// the OoT decomp, the same for child and adult Link). Floors below that start are candidates, and
+// the actor is put on the highest one if it's at or above the actor's current Y.
+constexpr float FloorCheckHeight = 50.0f;
+
 QString SettingsPath() {
     return QString::fromStdString(
         fmt::format("{}seam_calculator.ini", FileUtil::GetUserPath(FileUtil::UserPath::ConfigDir)));
@@ -97,7 +102,7 @@ SeamCalculatorWidget::SeamCalculatorWidget(Core::System& system_, QWidget* paren
     QSettings settings(SettingsPath(), QSettings::IniFormat);
     address_edit->setText(settings.value(QStringLiteral("actor_address")).toString());
     radius_spin->setValue(settings.value(QStringLiteral("radius"), 200).toInt());
-    target_spin->setValue(settings.value(QStringLiteral("target_gap"), 1.0).toDouble());
+    target_spin->setValue(settings.value(QStringLiteral("target_gap"), 25.0).toDouble());
     const QString path = settings.value(QStringLiteral("collision_file")).toString();
     if (!path.isEmpty() && QFile::exists(path)) {
         LoadCollision(path);
@@ -239,8 +244,8 @@ QWidget* SeamCalculatorWidget::CreateLiveGroup() {
     target_spin->setRange(-100000.0, 100000.0);
     target_spin->setDecimals(2);
     target_spin->setSuffix(tr(" above Link's Y"));
-    target_spin->setToolTip(tr("Seam height to aim for, relative to Link's feet. Link snaps up "
-                               "onto a floor that is a little above his feet."));
+    target_spin->setToolTip(tr("Seam height to aim for, relative to Link's feet. Link is put on "
+                               "a floor from his feet up to 50 units above his previous Y."));
     connect(target_spin, &QDoubleSpinBox::valueChanged, this, [this] { Update(); });
     form->addRow(tr("Target height"), target_spin);
     target_label = new QLabel(group);
@@ -316,14 +321,15 @@ std::optional<SeamCalculatorWidget::LinkState> SeamCalculatorWidget::ReadLink() 
     const auto x = ReadFloat(*address + OffsetWorldPos);
     const auto y = ReadFloat(*address + OffsetWorldPos + 4);
     const auto z = ReadFloat(*address + OffsetWorldPos + 8);
+    const auto prev_y = ReadFloat(*address + OffsetPrevPos + 4);
     const auto floor_height = ReadFloat(*address + OffsetFloorHeight);
     const auto flags = system.MemoryEditor().Peek(*address + OffsetBgCheckFlags, 2);
-    if (!x || !y || !z || !floor_height || !flags) {
+    if (!x || !y || !z || !prev_y || !floor_height || !flags) {
         return std::nullopt;
     }
     u16 bg_check_flags;
     std::memcpy(&bg_check_flags, flags->data(), sizeof(bg_check_flags));
-    return LinkState{*x, *y, *z, *floor_height, bg_check_flags};
+    return LinkState{*x, *y, *z, *prev_y, *floor_height, bg_check_flags};
 }
 
 void SeamCalculatorWidget::LoadCollision(const QString& path) {
@@ -522,13 +528,21 @@ void SeamCalculatorWidget::Update() {
     const float gap = height - link->y;
     const bool accepted = tri.ContainsXZ(link->x, link->z);
     if (accepted) {
+        // The seam is a candidate if it's below the start of the floor ray, and Link is put on it
+        // if it's also at or above his feet (and it's the highest candidate)
+        const float ray_start = link->prev_y + FloorCheckHeight;
         QString state;
-        if (gap > 0.0f) {
-            state = tr("above Link's feet: he snaps up onto it if it's within his step-up reach");
+        if (height >= ray_start) {
+            state = tr("too high: the floor check only sees floors below %1 (previous Y + 50)")
+                        .arg(ray_start, 0, 'f', 2);
+        } else if (gap >= 0.0f) {
+            state =
+                Colored(tr("in pop-up range, below %1 (previous Y + 50)").arg(ray_start, 0, 'f', 2),
+                        "#20a020");
         } else {
             state = tr("below Link's feet");
         }
-        height_label->setText(tr("height %1, %2 %3 Link's Y (%4)")
+        height_label->setText(tr("height %1, %2 %3 Link's Y: %4")
                                   .arg(height, 0, 'f', 2)
                                   .arg(std::fabs(gap), 0, 'f', 2)
                                   .arg(gap >= 0.0f ? tr("above") : tr("below"))

@@ -47,6 +47,7 @@ protected:
 private:
     struct LinkState {
         float x, y, z;
+        float prev_y;
         float floor_height;
         u16 bg_check_flags;
     };
