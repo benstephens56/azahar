@@ -12,7 +12,6 @@
 #include "common/common_types.h"
 
 class EmuThread;
-class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -91,7 +90,7 @@ private:
     QLabel* vertices_label;
     QLabel* height_label;
     QLabel* game_floor_label;
-    QDoubleSpinBox* target_spin;
+    QLabel* band_label;
     QLabel* target_label;
     QPushButton* move_button;
 

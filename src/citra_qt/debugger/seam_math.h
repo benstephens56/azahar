@@ -161,47 +161,78 @@ struct Triangle {
 };
 
 /**
- * Finds the point closest to (x, z) where the plane of the triangle is at `height` and the floor
- * check accepts the triangle (within the check distance of a vertex). Returns nullopt if the
- * plane's line at that height doesn't pass through any vertex circle.
+ * Finds the point closest to (x, z) where the floor check accepts the triangle (within the check
+ * distance of a vertex) and its plane is between `min_height` and `max_height`. Returns (x, z)
+ * itself if it already is, and nullopt if there is no such point.
  */
-inline std::optional<std::array<float, 2>> ClosestPointAtHeight(const Triangle& tri, float x,
-                                                                float z, float height) {
-    const float rise = tri.RisePerUnit();
-    if (!std::isfinite(rise) || rise <= 0.0f) {
+inline std::optional<std::array<float, 2>> ClosestPointInHeightRange(const Triangle& tri, float x,
+                                                                     float z, float min_height,
+                                                                     float max_height) {
+    const double rise = tri.RisePerUnit();
+    if (!std::isfinite(rise) || rise <= 0.0 || min_height > max_height) {
         return std::nullopt;
     }
     const auto [ux, uz] = tri.UphillDirection();
-    // Closest point of the line at that height (all of it, not only the circles)
-    const double along = (static_cast<double>(height) - tri.HeightAt(x, z)) / rise;
-    const double px = x + ux * along;
-    const double pz = z + uz * along;
-    // Direction of the line (perpendicular to the uphill direction)
-    const double wx = -uz;
-    const double wz = ux;
+    // Positions along the uphill direction from (x, z) where the plane is at the two heights
+    const double height_here = tri.HeightAt(x, z);
+    const double s_min = (min_height - height_here) / rise;
+    const double s_max = (max_height - height_here) / rise;
+    const auto along = [&](double px, double pz) { return (px - x) * ux + (pz - z) * uz; };
+    // Slightly smaller than the check distance, to stay inside despite rounding
+    const double radius = CheckDist * 0.999;
 
     std::optional<std::array<float, 2>> best;
     double best_distance = 0.0;
+    const auto consider = [&](double px, double pz) {
+        const double distance = std::hypot(px - x, pz - z);
+        if (!best || distance < best_distance) {
+            best = std::array<float, 2>{static_cast<float>(px), static_cast<float>(pz)};
+            best_distance = distance;
+        }
+    };
+
     for (std::size_t i = 0; i < 3; ++i) {
         const double cx = tri.vertices[i][0];
         const double cz = tri.vertices[i][2];
-        // Part of the line inside this vertex's circle (slightly smaller, to stay inside)
-        const double center_t = (cx - px) * wx + (cz - pz) * wz;
-        const double off_x = px + wx * center_t - cx;
-        const double off_z = pz + wz * center_t - cz;
-        const double off_sq = off_x * off_x + off_z * off_z;
-        const double radius = CheckDist * 0.999;
-        if (off_sq >= radius * radius) {
-            continue;
+        const auto in_disc = [&](double px, double pz) {
+            return std::hypot(px - cx, pz - cz) < radius;
+        };
+        const auto in_strip = [&](double px, double pz) {
+            const double s = along(px, pz);
+            return s >= s_min && s <= s_max;
+        };
+
+        // (x, z) moved straight into the band
+        const double s = std::clamp(0.0, s_min, s_max);
+        if (in_disc(x + ux * s, z + uz * s)) {
+            consider(x + ux * s, z + uz * s);
         }
-        const double half = std::sqrt(radius * radius - off_sq);
-        const double t = std::clamp(0.0, center_t - half, center_t + half);
-        const double qx = px + wx * t;
-        const double qz = pz + wz * t;
-        const double distance = std::hypot(qx - x, qz - z);
-        if (!best || distance < best_distance) {
-            best = std::array<float, 2>{static_cast<float>(qx), static_cast<float>(qz)};
-            best_distance = distance;
+        // The closest point of the circle, if it's in the band
+        const double to_center = std::hypot(cx - x, cz - z);
+        if (to_center > radius) {
+            const double px = cx + (x - cx) * radius / to_center;
+            const double pz = cz + (z - cz) * radius / to_center;
+            if (in_strip(px, pz)) {
+                consider(px, pz);
+            }
+        }
+        // The closest points of the band's two edges inside the circle
+        for (const double edge : {s_min, s_max}) {
+            const double lx = x + ux * edge;
+            const double lz = z + uz * edge;
+            // Direction of the edge (perpendicular to the uphill direction)
+            const double wx = -uz;
+            const double wz = ux;
+            const double center_t = (cx - lx) * wx + (cz - lz) * wz;
+            const double off_x = lx + wx * center_t - cx;
+            const double off_z = lz + wz * center_t - cz;
+            const double off_sq = off_x * off_x + off_z * off_z;
+            if (off_sq >= radius * radius) {
+                continue;
+            }
+            const double half = std::sqrt(radius * radius - off_sq);
+            const double t = std::clamp(0.0, center_t - half, center_t + half);
+            consider(lx + wx * t, lz + wz * t);
         }
     }
     return best;

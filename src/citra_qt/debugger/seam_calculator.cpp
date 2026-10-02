@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <QDoubleSpinBox>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -102,7 +101,6 @@ SeamCalculatorWidget::SeamCalculatorWidget(Core::System& system_, QWidget* paren
     QSettings settings(SettingsPath(), QSettings::IniFormat);
     address_edit->setText(settings.value(QStringLiteral("actor_address")).toString());
     radius_spin->setValue(settings.value(QStringLiteral("radius"), 200).toInt());
-    target_spin->setValue(settings.value(QStringLiteral("target_gap"), 25.0).toDouble());
     const QString path = settings.value(QStringLiteral("collision_file")).toString();
     if (!path.isEmpty() && QFile::exists(path)) {
         LoadCollision(path);
@@ -121,7 +119,6 @@ void SeamCalculatorWidget::SaveSettings() const {
     QSettings settings(SettingsPath(), QSettings::IniFormat);
     settings.setValue(QStringLiteral("actor_address"), address_edit->text());
     settings.setValue(QStringLiteral("radius"), radius_spin->value());
-    settings.setValue(QStringLiteral("target_gap"), target_spin->value());
     settings.setValue(QStringLiteral("collision_file"), collision_path);
 }
 
@@ -240,19 +237,17 @@ QWidget* SeamCalculatorWidget::CreateLiveGroup() {
     game_floor_label->setWordWrap(true);
     form->addRow(tr("Game's floor"), game_floor_label);
 
-    target_spin = new QDoubleSpinBox(group);
-    target_spin->setRange(-100000.0, 100000.0);
-    target_spin->setDecimals(2);
-    target_spin->setSuffix(tr(" above Link's Y"));
-    target_spin->setToolTip(tr("Seam height to aim for, relative to Link's feet. Link is put on "
-                               "a floor from his feet up to 50 units above his previous Y."));
-    connect(target_spin, &QDoubleSpinBox::valueChanged, this, [this] { Update(); });
-    form->addRow(tr("Target height"), target_spin);
+    band_label = new QLabel(group);
+    band_label->setWordWrap(true);
+    band_label->setToolTip(
+        tr("Link is put on the seam where its height is from his feet up to "
+           "50 units above his previous Y (the start of the floor check's ray)."));
+    form->addRow(tr("Pop-up band"), band_label);
     target_label = new QLabel(group);
     target_label->setWordWrap(true);
     target_label->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    form->addRow(tr("Target point"), target_label);
-    move_button = new QPushButton(tr("Move Link to Target (memory write, for testing)"), group);
+    form->addRow(tr("Nearest spot"), target_label);
+    move_button = new QPushButton(tr("Move Link onto the Seam (memory write, for testing)"), group);
     move_button->setToolTip(
         tr("Writes the target X and Z to Link's position (and previous position). This is not an "
            "input: a movie recorded with it will not play back the same."));
@@ -487,6 +482,7 @@ void SeamCalculatorWidget::Update() {
         vertices_label->clear();
         height_label->clear();
         game_floor_label->clear();
+        band_label->clear();
         target_label->clear();
         return;
     }
@@ -510,6 +506,7 @@ void SeamCalculatorWidget::Update() {
         vertices_label->clear();
         height_label->clear();
         game_floor_label->clear();
+        band_label->clear();
         target_label->clear();
         return;
     }
@@ -560,23 +557,41 @@ void SeamCalculatorWidget::Update() {
         game_floor_label->setText(tr("%1").arg(link->floor_height, 0, 'f', 3));
     }
 
-    const float target_height = link->y + static_cast<float>(target_spin->value());
-    target = SeamMath::ClosestPointAtHeight(tri, link->x, link->z, target_height);
-    if (!target) {
-        target_label->setText(tr("The seam doesn't reach height %1 near any of its vertices.")
-                                  .arg(target_height, 0, 'f', 2));
+    // Where Link pops up onto the seam: from his feet up to the start of the floor check's ray
+    const float band_min = link->y;
+    const float band_max = link->prev_y + FloorCheckHeight;
+    const float band_width = (band_max - band_min) / tri.RisePerUnit();
+    const bool in_band = accepted && height >= band_min && height < band_max;
+    band_label->setText(
+        tr("heights %1 to %2, %3 units wide in XZ%4")
+            .arg(band_min, 0, 'f', 2)
+            .arg(band_max, 0, 'f', 2)
+            .arg(band_width, 0, 'f', band_width < 0.1f ? 5 : 3)
+            .arg(in_band ? QStringLiteral(" — ") + Colored(tr("Link is in it ✓"), "#20a020")
+                         : QString{}));
+
+    const auto nearest =
+        SeamMath::ClosestPointInHeightRange(tri, link->x, link->z, band_min, band_max);
+    if (!nearest) {
+        target_label->setText(tr("The seam doesn't reach these heights near any of its vertices."));
         return;
     }
-    const float dx = (*target)[0] - link->x;
-    const float dz = (*target)[1] - link->z;
-    target_label->setText(tr("X %1   Z %2   (move X %3, Z %4: %5 units; seam height there %6)")
-                              .arg((*target)[0], 0, 'f', 4)
-                              .arg((*target)[1], 0, 'f', 4)
-                              .arg(dx, 0, 'f', 4)
-                              .arg(dz, 0, 'f', 4)
-                              .arg(std::hypot(dx, dz), 0, 'f', 4)
-                              .arg(tri.HeightAt((*target)[0], (*target)[1]), 0, 'f', 2));
-    move_button->setEnabled(true);
+    const float dx = (*nearest)[0] - link->x;
+    const float dz = (*nearest)[1] - link->z;
+    target_label->setText(in_band ? tr("Link is already in the band.")
+                                  : tr("X %1   Z %2   (move X %3, Z %4: %5 units)")
+                                        .arg((*nearest)[0], 0, 'f', 5)
+                                        .arg((*nearest)[1], 0, 'f', 5)
+                                        .arg(dx, 0, 'f', 5)
+                                        .arg(dz, 0, 'f', 5)
+                                        .arg(std::hypot(dx, dz), 0, 'f', 5));
+
+    // Move a little inside the band's edges, so that rounding can't leave Link outside of it
+    constexpr float EdgeMargin = 5.0f;
+    const float margin = std::min(EdgeMargin, (band_max - band_min) / 4.0f);
+    target = SeamMath::ClosestPointInHeightRange(tri, link->x, link->z, band_min + margin,
+                                                 band_max - margin);
+    move_button->setEnabled(target.has_value());
 }
 
 void SeamCalculatorWidget::MoveLinkToTarget() {
