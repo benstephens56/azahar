@@ -64,6 +64,7 @@
 #include "citra_qt/debugger/memory_search.h"
 #include "citra_qt/debugger/memory_watch.h"
 #include "citra_qt/debugger/registers.h"
+#include "citra_qt/debugger/seam_calculator.h"
 #include "citra_qt/debugger/tas_editor.h"
 #include "citra_qt/debugger/tas_input.h"
 #include "citra_qt/debugger/wait_tree.h"
@@ -755,6 +756,15 @@ void GMainWindow::InitializeDebugWidgets() {
             &MemorySearchWidget::OnEmulationStarting);
     connect(this, &GMainWindow::EmulationStopping, memorySearchWidget,
             &MemorySearchWidget::OnEmulationStopping);
+
+    seamCalculatorWidget = new SeamCalculatorWidget(system, this);
+    addDockWidget(Qt::RightDockWidgetArea, seamCalculatorWidget);
+    seamCalculatorWidget->hide();
+    debug_menu->addAction(seamCalculatorWidget->toggleViewAction());
+    connect(this, &GMainWindow::EmulationStarting, seamCalculatorWidget,
+            &SeamCalculatorWidget::OnEmulationStarting);
+    connect(this, &GMainWindow::EmulationStopping, seamCalculatorWidget,
+            &SeamCalculatorWidget::OnEmulationStopping);
 
     tasInputWidget = new TasInputWidget(system, this);
     addDockWidget(Qt::RightDockWidgetArea, tasInputWidget);

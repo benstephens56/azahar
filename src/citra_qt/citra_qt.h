@@ -63,6 +63,7 @@ class QPushButton;
 class QSlider;
 class RegistersWidget;
 class MemoryWatchWidget;
+class SeamCalculatorWidget;
 class MemorySearchWidget;
 class TasInputWidget;
 class TasEditorWidget;
@@ -440,6 +441,7 @@ private:
 #endif
     RegistersWidget* registersWidget{};
     MemoryWatchWidget* memoryWatchWidget{};
+    SeamCalculatorWidget* seamCalculatorWidget{};
     MemorySearchWidget* memorySearchWidget{};
     TasInputWidget* tasInputWidget{};
     TasEditorWidget* tasEditorWidget{};
