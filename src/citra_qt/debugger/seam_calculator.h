@@ -12,6 +12,7 @@
 #include "common/common_types.h"
 
 class EmuThread;
+class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -49,13 +50,22 @@ private:
         float prev_y;
         float floor_height;
         u16 bg_check_flags;
+        u16 yaw;                       ///< Direction Link moves in (world.rot.y)
+        float speed;                   ///< speedXZ
+        std::optional<u16> camera_yaw; ///< Input yaw of the active camera, if known
     };
 
     QWidget* CreateLinkGroup();
     QWidget* CreateTriangleGroup();
     QWidget* CreateLiveGroup();
+    QWidget* CreateClimbGroup();
 
+    std::optional<VAddr> ContextAddress() const;
     std::optional<VAddr> ActorAddress() const;
+    std::optional<u32> ReadU32(VAddr address) const;
+    std::optional<u16> ReadU16(VAddr address) const;
+    /// Finds the address of the GlobalContext by scanning memory (see the .cpp)
+    void FindGlobalContext();
     std::optional<LinkState> ReadLink() const;
     std::optional<float> ReadFloat(VAddr address) const;
 
@@ -65,6 +75,8 @@ private:
     /// Reads the triangle from the fields, returns false if they are invalid
     bool ParseTriangleFields();
     void Update();
+    void UpdateClimb(const SeamMath::Triangle& tri, const LinkState& link);
+    void ClearClimb();
     void MoveLinkToTarget();
     void UpdateTimerState();
     void SaveSettings() const;
@@ -75,7 +87,9 @@ private:
     std::optional<SeamMath::Triangle> triangle;
     std::optional<std::array<float, 2>> target;
 
+    QLineEdit* context_edit;
     QLineEdit* address_edit;
+    QLabel* motion_label;
     QLabel* position_label;
     QLabel* floor_label;
 
@@ -93,6 +107,12 @@ private:
     QLabel* band_label;
     QLabel* target_label;
     QPushButton* move_button;
+
+    QLabel* next_frame_label;
+    QDoubleSpinBox* plan_speed_spin;
+    QDoubleSpinBox* aim_spin;
+    QSpinBox* stick_magnitude_spin;
+    std::array<QLabel*, 2> direction_labels{};
 
     QString collision_path;
     QTimer update_timer;

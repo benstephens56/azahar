@@ -34,6 +34,35 @@ inline bool IsZero(float f) {
     return std::fabs(f) < ZeroEpsilon;
 }
 
+/// The floor check casts its ray down from this far above the actor's previous Y (func_8002E2AC in
+/// the OoT decomp, the same for child and adult Link). Floors below that start are candidates, and
+/// the actor is put on the highest one if it's at or above the actor's current Y.
+constexpr float FloorCheckHeight = 50.0f;
+
+/// Angles of the game: 0x10000 per turn. Moving along yaw `y` adds (sin y, cos y) to (X, Z).
+constexpr double Pi = 3.14159265358979323846;
+inline double YawToRadians(double yaw) {
+    return yaw * Pi / 32768.0;
+}
+inline u16 RadiansToYaw(double radians) {
+    const long long yaw = std::llround(radians * 32768.0 / Pi);
+    return static_cast<u16>(yaw & 0xFFFF);
+}
+/// Yaw of a direction in the XZ plane
+inline u16 YawOf(double dx, double dz) {
+    return RadiansToYaw(std::atan2(dx, dz));
+}
+/// Signed difference a - b of two yaws, in (-0x8000, 0x8000]
+inline int YawDifference(u16 a, u16 b) {
+    return static_cast<s16>(static_cast<u16>(a - b));
+}
+
+/// Angle of the control stick as the game computes it (Lib_GetControlStickData): 0 is up, and it
+/// grows counterclockwise. Link's target yaw is the camera's input yaw plus this.
+inline u16 StickAngle(double stick_x, double stick_y) {
+    return RadiansToYaw(std::atan2(-stick_x, stick_y));
+}
+
 struct Triangle {
     int index = -1; ///< Index in the collision file, -1 if entered manually
     std::array<std::array<s16, 3>, 3> vertices{};
