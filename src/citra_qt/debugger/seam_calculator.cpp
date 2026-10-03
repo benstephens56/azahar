@@ -99,10 +99,10 @@ SeamCalculatorWidget::SeamCalculatorWidget(Core::System& system_, QWidget* paren
     auto* contents = new QWidget;
     auto* layout = new QVBoxLayout(contents);
     layout->setContentsMargins(4, 4, 4, 4);
-    layout->addWidget(CreateLinkGroup());
-    layout->addWidget(CreateTriangleGroup(), 1);
-    layout->addWidget(CreateLiveGroup());
+    layout->addWidget(CreateSetupGroup());
+    layout->addWidget(CreateMountGroup());
     layout->addWidget(CreateClimbGroup());
+    layout->addStretch();
 
     auto* scroll = new QScrollArea(this);
     scroll->setWidgetResizable(true);
@@ -112,10 +112,10 @@ SeamCalculatorWidget::SeamCalculatorWidget(Core::System& system_, QWidget* paren
     QSettings settings(SettingsPath(), QSettings::IniFormat);
     context_edit->setText(settings.value(QStringLiteral("global_context")).toString());
     address_edit->setText(settings.value(QStringLiteral("actor_address")).toString());
-    plan_speed_spin->setValue(settings.value(QStringLiteral("plan_speed"), 1.0).toDouble());
-    aim_spin->setValue(settings.value(QStringLiteral("aim_gain"), 25.0).toDouble());
-    stick_magnitude_spin->setValue(settings.value(QStringLiteral("stick_magnitude"), 150).toInt());
     radius_spin->setValue(settings.value(QStringLiteral("radius"), 200).toInt());
+    aim_spin->setValue(settings.value(QStringLiteral("aim_gain2"), 30.0).toDouble());
+    stick_magnitude_spin->setValue(settings.value(QStringLiteral("stick_magnitude2"), 90).toInt());
+    plan_speed_spin->setValue(settings.value(QStringLiteral("plan_speed2"), 0.25).toDouble());
     const QString path = settings.value(QStringLiteral("collision_file")).toString();
     if (!path.isEmpty() && QFile::exists(path)) {
         LoadCollision(path);
@@ -134,18 +134,19 @@ void SeamCalculatorWidget::SaveSettings() const {
     QSettings settings(SettingsPath(), QSettings::IniFormat);
     settings.setValue(QStringLiteral("global_context"), context_edit->text());
     settings.setValue(QStringLiteral("actor_address"), address_edit->text());
-    settings.setValue(QStringLiteral("plan_speed"), plan_speed_spin->value());
-    settings.setValue(QStringLiteral("aim_gain"), aim_spin->value());
-    settings.setValue(QStringLiteral("stick_magnitude"), stick_magnitude_spin->value());
     settings.setValue(QStringLiteral("radius"), radius_spin->value());
+    settings.setValue(QStringLiteral("aim_gain2"), aim_spin->value());
+    settings.setValue(QStringLiteral("stick_magnitude2"), stick_magnitude_spin->value());
+    settings.setValue(QStringLiteral("plan_speed2"), plan_speed_spin->value());
     settings.setValue(QStringLiteral("collision_file"), collision_path);
 }
 
-QWidget* SeamCalculatorWidget::CreateLinkGroup() {
-    auto* group = new QGroupBox(tr("Link"));
-    auto* form = new QFormLayout(group);
+QWidget* SeamCalculatorWidget::CreateSetupGroup() {
+    auto* group = new QGroupBox(tr("Setup"));
+    auto* layout = new QVBoxLayout(group);
 
     auto* context_row = new QHBoxLayout;
+    context_row->addWidget(new QLabel(tr("GlobalContext"), group));
     context_edit = new QLineEdit(group);
     context_edit->setPlaceholderText(tr("Click Find while in game"));
     context_edit->setToolTip(tr("Address of the GlobalContext. With it, Link's actor and the "
@@ -159,75 +160,7 @@ QWidget* SeamCalculatorWidget::CreateLinkGroup() {
     connect(find_context_button, &QPushButton::clicked, this,
             &SeamCalculatorWidget::FindGlobalContext);
     context_row->addWidget(find_context_button);
-    form->addRow(tr("GlobalContext"), context_row);
-
-    address_edit = new QLineEdit(group);
-    address_edit->setPlaceholderText(tr("Only needed without the GlobalContext, e.g. 0x0898F9A0"));
-    address_edit->setToolTip(tr("The start of the player actor. Link's X position is at +0x28, "
-                                "Y at +0x2C and Z at +0x30 from it."));
-    connect(address_edit, &QLineEdit::editingFinished, this, [this] {
-        SaveSettings();
-        Update();
-    });
-    form->addRow(tr("Actor address"), address_edit);
-    position_label = new QLabel(group);
-    position_label->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    form->addRow(tr("Position"), position_label);
-    floor_label = new QLabel(group);
-    form->addRow(tr("Floor"), floor_label);
-    motion_label = new QLabel(group);
-    form->addRow(tr("Movement"), motion_label);
-    return group;
-}
-
-QWidget* SeamCalculatorWidget::CreateClimbGroup() {
-    auto* group = new QGroupBox(tr("Climb"));
-    auto* form = new QFormLayout(group);
-    next_frame_label = new QLabel(group);
-    next_frame_label->setWordWrap(true);
-    next_frame_label->setToolTip(tr("Where Link's current speed and direction take him next frame. "
-                                    "He falls if he gains 50 or more."));
-    form->addRow(tr("Next frame"), next_frame_label);
-
-    plan_speed_spin = new QDoubleSpinBox(group);
-    plan_speed_spin->setRange(0.01, 20.0);
-    plan_speed_spin->setDecimals(2);
-    plan_speed_spin->setSingleStep(0.1);
-    plan_speed_spin->setSuffix(tr(" units/frame"));
-    plan_speed_spin->setToolTip(tr("Speed used to plan directions while Link is slower than this "
-                                   "(e.g. standing still). Link's own speed is used when higher."));
-    connect(plan_speed_spin, &QDoubleSpinBox::valueChanged, this, [this] { Update(); });
-    form->addRow(tr("Plan for speed"), plan_speed_spin);
-
-    aim_spin = new QDoubleSpinBox(group);
-    aim_spin->setRange(0.1, 49.9);
-    aim_spin->setDecimals(1);
-    aim_spin->setSuffix(tr(" height per frame"));
-    aim_spin->setToolTip(tr("Height to gain per frame when aiming. Under 50, with some margin for "
-                            "speed changes and the stick's precision."));
-    connect(aim_spin, &QDoubleSpinBox::valueChanged, this, [this] { Update(); });
-    form->addRow(tr("Aim to gain"), aim_spin);
-
-    stick_magnitude_spin = new QSpinBox(group);
-    stick_magnitude_spin->setRange(1, 156);
-    stick_magnitude_spin->setToolTip(
-        tr("Circle pad distance from the center (as in the TAS Input window) used for the "
-           "suggested positions. On a seam Link only moves with the stick quite far out."));
-    connect(stick_magnitude_spin, &QSpinBox::valueChanged, this, [this] { Update(); });
-    form->addRow(tr("Stick magnitude"), stick_magnitude_spin);
-
-    for (std::size_t i = 0; i < direction_labels.size(); ++i) {
-        direction_labels[i] = new QLabel(group);
-        direction_labels[i]->setWordWrap(true);
-        direction_labels[i]->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        form->addRow(tr("Way %1").arg(i + 1), direction_labels[i]);
-    }
-    return group;
-}
-
-QWidget* SeamCalculatorWidget::CreateTriangleGroup() {
-    auto* group = new QGroupBox(tr("Seam triangle"));
-    auto* layout = new QVBoxLayout(group);
+    layout->addLayout(context_row);
 
     auto* file_row = new QHBoxLayout;
     auto* load_button = new QPushButton(tr("Load Collision..."), group);
@@ -249,12 +182,17 @@ QWidget* SeamCalculatorWidget::CreateTriangleGroup() {
     find_row->addWidget(new QLabel(tr("Seams within"), group));
     radius_spin = new QSpinBox(group);
     radius_spin->setRange(1, 100000);
-    radius_spin->setSuffix(tr(" units of Link"));
+    radius_spin->setSuffix(tr(" units"));
     find_row->addWidget(radius_spin);
     auto* find_button = new QPushButton(tr("Find"), group);
     connect(find_button, &QPushButton::clicked, this, &SeamCalculatorWidget::FindSeams);
     find_row->addWidget(find_button);
     find_row->addStretch();
+    auto* details_button = new QPushButton(tr("Details"), group);
+    details_button->setCheckable(true);
+    details_button->setToolTip(tr("Shows the selected triangle's data (editable) and the address "
+                                  "of Link's actor"));
+    find_row->addWidget(details_button);
     layout->addLayout(find_row);
 
     seam_table = new QTableWidget(0, 5, group);
@@ -265,7 +203,8 @@ QWidget* SeamCalculatorWidget::CreateTriangleGroup() {
     seam_table->setSelectionMode(QAbstractItemView::SingleSelection);
     seam_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     seam_table->horizontalHeader()->setStretchLastSection(true);
-    seam_table->setMinimumHeight(120);
+    seam_table->setMinimumHeight(100);
+    seam_table->setMaximumHeight(200);
     connect(seam_table, &QTableWidget::itemSelectionChanged, this, [this] {
         const auto rows = seam_table->selectionModel()->selectedRows();
         if (rows.isEmpty()) {
@@ -280,16 +219,22 @@ QWidget* SeamCalculatorWidget::CreateTriangleGroup() {
     });
     layout->addWidget(seam_table, 1);
 
-    auto* form = new QFormLayout;
+    triangle_label = new QLabel(group);
+    triangle_label->setWordWrap(true);
+    layout->addWidget(triangle_label);
+
+    details_widget = new QWidget(group);
+    auto* form = new QFormLayout(details_widget);
+    form->setContentsMargins(0, 0, 0, 0);
     for (std::size_t i = 0; i < vertex_edits.size(); ++i) {
-        vertex_edits[i] = new QLineEdit(group);
+        vertex_edits[i] = new QLineEdit(details_widget);
         vertex_edits[i]->setPlaceholderText(QStringLiteral("x, y, z"));
         form->addRow(tr("Vertex %1").arg(i + 1), vertex_edits[i]);
     }
-    normal_edit = new QLineEdit(group);
+    normal_edit = new QLineEdit(details_widget);
     normal_edit->setPlaceholderText(tr("x, y, z (as stored, e.g. -12161, 4, 30426)"));
     form->addRow(tr("Normal"), normal_edit);
-    dist_edit = new QLineEdit(group);
+    dist_edit = new QLineEdit(details_widget);
     dist_edit->setPlaceholderText(tr("e.g. -477.623"));
     form->addRow(tr("Distance"), dist_edit);
     for (QLineEdit* edit :
@@ -299,44 +244,378 @@ QWidget* SeamCalculatorWidget::CreateTriangleGroup() {
             Update();
         });
     }
-    layout->addLayout(form);
-    triangle_label = new QLabel(group);
-    triangle_label->setWordWrap(true);
-    layout->addWidget(triangle_label);
+    address_edit = new QLineEdit(details_widget);
+    address_edit->setPlaceholderText(tr("Only needed without the GlobalContext"));
+    address_edit->setToolTip(tr("The start of the player actor. Link's X position is at +0x28, "
+                                "Y at +0x2C and Z at +0x30 from it."));
+    connect(address_edit, &QLineEdit::editingFinished, this, [this] {
+        SaveSettings();
+        Update();
+    });
+    form->addRow(tr("Link's actor"), address_edit);
+    details_widget->setVisible(false);
+    connect(details_button, &QPushButton::toggled, details_widget, &QWidget::setVisible);
+    layout->addWidget(details_widget);
+
+    link_label = new QLabel(group);
+    link_label->setWordWrap(true);
+    link_label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(link_label);
     return group;
 }
 
-QWidget* SeamCalculatorWidget::CreateLiveGroup() {
-    auto* group = new QGroupBox(tr("Live"));
-    auto* form = new QFormLayout(group);
-    vertices_label = new QLabel(group);
-    vertices_label->setToolTip(tr("Distance from Link to each vertex in the XZ plane. The floor "
-                                  "check accepts a seam triangle within 1 unit of a vertex."));
-    form->addRow(tr("Vertex distances"), vertices_label);
-    height_label = new QLabel(group);
-    height_label->setWordWrap(true);
-    form->addRow(tr("Seam under Link"), height_label);
-    game_floor_label = new QLabel(group);
-    game_floor_label->setWordWrap(true);
-    form->addRow(tr("Game's floor"), game_floor_label);
+QWidget* SeamCalculatorWidget::CreateMountGroup() {
+    auto* group = new QGroupBox(tr("Get onto the seam"));
+    auto* layout = new QVBoxLayout(group);
+    mount_status_label = new QLabel(group);
+    mount_status_label->setWordWrap(true);
+    QFont font = mount_status_label->font();
+    font.setPointSizeF(font.pointSizeF() * 1.2);
+    font.setBold(true);
+    mount_status_label->setFont(font);
+    layout->addWidget(mount_status_label);
 
-    band_label = new QLabel(group);
-    band_label->setWordWrap(true);
-    band_label->setToolTip(
-        tr("Link is put on the seam where its height is from his feet up to "
-           "50 units above his previous Y (the start of the floor check's ray)."));
-    form->addRow(tr("Pop-up band"), band_label);
+    auto* form = new QFormLayout;
     target_label = new QLabel(group);
     target_label->setWordWrap(true);
     target_label->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    form->addRow(tr("Nearest spot"), target_label);
-    move_button = new QPushButton(tr("Move Link onto the Seam (memory write, for testing)"), group);
+    target_label->setToolTip(tr("The closest spot where the seam is right at Link's feet (0.00 "
+                                "above his Y), where he steps onto it."));
+    form->addRow(tr("Target"), target_label);
+    walk_label = new QLabel(group);
+    walk_label->setWordWrap(true);
+    walk_label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    walk_label->setToolTip(tr("Direction from Link to the target, and the circle pad position "
+                              "(at the stick magnitude below) for it with the current camera"));
+    form->addRow(tr("Walk straight"), walk_label);
+    layout->addLayout(form);
+
+    move_button = new QPushButton(tr("Move Link to the Target (memory write, for testing)"), group);
     move_button->setToolTip(
         tr("Writes the target X and Z to Link's position (and previous position). This is not an "
            "input: a movie recorded with it will not play back the same."));
     connect(move_button, &QPushButton::clicked, this, &SeamCalculatorWidget::MoveLinkToTarget);
-    form->addRow(move_button);
+    layout->addWidget(move_button);
     return group;
+}
+
+QWidget* SeamCalculatorWidget::CreateClimbGroup() {
+    auto* group = new QGroupBox(tr("Climb"));
+    auto* layout = new QVBoxLayout(group);
+    auto* form = new QFormLayout;
+    next_frame_label = new QLabel(group);
+    next_frame_label->setWordWrap(true);
+    next_frame_label->setToolTip(tr("What Link's current speed and direction do next frame. He "
+                                    "falls off if he gains 50 or more."));
+    form->addRow(tr("Next frame"), next_frame_label);
+    for (std::size_t i = 0; i < way_labels.size(); ++i) {
+        way_labels[i] = new QLabel(group);
+        way_labels[i]->setWordWrap(true);
+        way_labels[i]->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        form->addRow(tr("Way %1").arg(i + 1), way_labels[i]);
+    }
+    layout->addLayout(form);
+
+    auto* settings_row = new QHBoxLayout;
+    settings_row->addWidget(new QLabel(tr("Aim"), group));
+    aim_spin = new QDoubleSpinBox(group);
+    aim_spin->setRange(0.1, 49.9);
+    aim_spin->setDecimals(1);
+    aim_spin->setSuffix(tr(" /frame"));
+    aim_spin->setToolTip(tr("Height to gain per frame. Under 50, with some margin for speed "
+                            "changes and the stick's precision."));
+    connect(aim_spin, &QDoubleSpinBox::valueChanged, this, [this] { Update(); });
+    settings_row->addWidget(aim_spin);
+    settings_row->addWidget(new QLabel(tr("Stick"), group));
+    stick_magnitude_spin = new QSpinBox(group);
+    stick_magnitude_spin->setRange(1, 156);
+    stick_magnitude_spin->setToolTip(tr("Circle pad distance from the center (as in the TAS Input "
+                                        "window) for the suggested positions"));
+    connect(stick_magnitude_spin, &QSpinBox::valueChanged, this, [this] { Update(); });
+    settings_row->addWidget(stick_magnitude_spin);
+    settings_row->addWidget(new QLabel(tr("Speed if still"), group));
+    plan_speed_spin = new QDoubleSpinBox(group);
+    plan_speed_spin->setRange(0.01, 20.0);
+    plan_speed_spin->setDecimals(2);
+    plan_speed_spin->setSingleStep(0.05);
+    plan_speed_spin->setToolTip(tr("Speed to plan for while Link isn't moving. While he moves, "
+                                   "his actual speed is used (on a seam it's much lower than on "
+                                   "flat ground)."));
+    connect(plan_speed_spin, &QDoubleSpinBox::valueChanged, this, [this] { Update(); });
+    settings_row->addWidget(plan_speed_spin);
+    settings_row->addStretch();
+    layout->addLayout(settings_row);
+    return group;
+}
+
+std::optional<std::array<int, 3>> SeamCalculatorWidget::StickFor(u16 yaw,
+                                                                 const LinkState& link) const {
+    using namespace SeamMath;
+    if (!link.camera_yaw) {
+        return std::nullopt;
+    }
+    // Link's target direction is the camera's input yaw plus the stick angle
+    // (Player_ProcessControlStick)
+    const int magnitude = stick_magnitude_spin->value();
+    const u16 stick_angle = static_cast<u16>(yaw - *link.camera_yaw);
+    const double angle = YawToRadians(stick_angle);
+    const int ideal_x = static_cast<int>(std::lround(-magnitude * std::sin(angle)));
+    const int ideal_y = static_cast<int>(std::lround(magnitude * std::cos(angle)));
+    // The nearby whole positions, for the one closest to the angle
+    int best_x = ideal_x;
+    int best_y = ideal_y;
+    int best_error = std::numeric_limits<int>::max();
+    for (int dy = -3; dy <= 3; ++dy) {
+        for (int dx = -3; dx <= 3; ++dx) {
+            const int px = ideal_x + dx;
+            const int py = ideal_y + dy;
+            if (px * px + py * py > 156 * 156) {
+                continue;
+            }
+            const int error = std::abs(YawDifference(StickAngle(px, py), stick_angle));
+            if (error < best_error) {
+                best_error = error;
+                best_x = px;
+                best_y = py;
+            }
+        }
+    }
+    return std::array<int, 3>{best_x, best_y,
+                              static_cast<u16>(*link.camera_yaw + StickAngle(best_x, best_y))};
+}
+
+void SeamCalculatorWidget::ClearLive() {
+    for (QLabel* label : {mount_status_label, target_label, walk_label, next_frame_label,
+                          way_labels[0], way_labels[1]}) {
+        label->clear();
+    }
+    target.reset();
+    move_button->setEnabled(false);
+}
+
+void SeamCalculatorWidget::Update() {
+    const auto link = ReadLink();
+    const auto hex = [](u16 value) {
+        return QStringLiteral("0x%1").arg(value, 4, 16, QLatin1Char('0'));
+    };
+    if (link) {
+        const bool ground = link->bg_check_flags & BgCheckGround;
+        link_label->setText(tr("Link: X %1  Y %2  Z %3, %4, speed %5, direction %6, camera %7")
+                                .arg(link->x, 0, 'f', 4)
+                                .arg(link->y, 0, 'f', 2)
+                                .arg(link->z, 0, 'f', 4)
+                                .arg(ground ? tr("on the ground") : tr("in the air"))
+                                .arg(link->speed, 0, 'f', 3)
+                                .arg(hex(link->yaw))
+                                .arg(link->camera_yaw ? hex(*link->camera_yaw) : tr("unknown")));
+    } else {
+        link_label->setText(emulation_running ? tr("Link: find the GlobalContext") : QString{});
+    }
+
+    if (!triangle) {
+        triangle_label->setText(tr("Pick a seam from the list."));
+        ClearLive();
+        return;
+    }
+    const auto& tri = *triangle;
+    QString info = tri.index >= 0 ? tr("Poly %1: ").arg(tri.index) : QString{};
+    if (!tri.IsStandable()) {
+        info += tr("faces down or has a normal Y of zero, the floor check never uses it.");
+    } else {
+        info += tr("rises %1 per unit in XZ").arg(tri.RisePerUnit(), 0, 'f', 1);
+        if (link) {
+            QStringList distances;
+            for (std::size_t v = 0; v < 3; ++v) {
+                distances << QString::number(tri.VertexDistance(v, link->x, link->z), 'f', 3);
+            }
+            info += tr("; Link is %1 from its vertices (on it within 1)")
+                        .arg(distances.join(QStringLiteral(" / ")));
+        }
+    }
+    triangle_label->setText(info);
+
+    if (!link || !tri.IsStandable()) {
+        ClearLive();
+        return;
+    }
+    UpdateMount(tri, *link);
+    UpdateClimb(tri, *link);
+}
+
+void SeamCalculatorWidget::UpdateMount(const SeamMath::Triangle& tri, const LinkState& link) {
+    using namespace SeamMath;
+    const auto hex = [](u16 value) {
+        return QStringLiteral("0x%1").arg(value, 4, 16, QLatin1Char('0'));
+    };
+    const float here = tri.HeightAt(link.x, link.z);
+    const bool inside = tri.ContainsXZ(link.x, link.z);
+    const bool on_seam = inside && (link.bg_check_flags & BgCheckGround) &&
+                         std::fabs(here - link.y) < 0.5f &&
+                         std::fabs(link.floor_height - here) < 0.01f;
+
+    if (on_seam) {
+        mount_status_label->setText(Colored(tr("Link is on the seam ✓"), "#20a020"));
+    } else if (inside) {
+        const float gap = here - link.y;
+        mount_status_label->setText(tr("Seam is %1 %2 Link's feet (target: 0.00)")
+                                        .arg(std::fabs(gap), 0, 'f', 2)
+                                        .arg(gap >= 0.0f ? tr("above") : tr("below"))
+                                        .toHtmlEscaped());
+    } else {
+        mount_status_label->setText(tr("Link is outside the seam").toHtmlEscaped());
+    }
+
+    // The closest spot where the seam is right at Link's feet: in practice Link only reliably gets
+    // onto a seam there, not anywhere he'd be moved up onto it. Aim a little above his Y, as moving
+    // by the smallest step can change a steep seam's height by almost a unit.
+    const float gap_steps = static_cast<float>(tri.RisePerUnit()) * 0.000244f;
+    const float aim_height = link.y + std::min(0.45f, gap_steps / 2.0f);
+    target = on_seam ? std::nullopt
+                     : ClosestPointInHeightRange(tri, link.x, link.z, aim_height, aim_height);
+    if (target) {
+        // Positions are floats: near the target, each step of X or Z can change a steep seam's
+        // height by almost a unit. Pick the nearby position (as stored) where the seam is closest
+        // to Link's feet without being below them.
+        const float tx = (*target)[0];
+        const float tz = (*target)[1];
+        std::optional<std::array<float, 2>> best;
+        float best_gap = 0.0f;
+        float x = tx;
+        for (int i = 0; i < 6; ++i) {
+            x = std::nextafter(x, -std::numeric_limits<float>::infinity());
+        }
+        for (int i = 0; i < 13;
+             ++i, x = std::nextafter(x, std::numeric_limits<float>::infinity())) {
+            float z = tz;
+            for (int j = 0; j < 6; ++j) {
+                z = std::nextafter(z, -std::numeric_limits<float>::infinity());
+            }
+            for (int j = 0; j < 13;
+                 ++j, z = std::nextafter(z, std::numeric_limits<float>::infinity())) {
+                const float gap = tri.HeightAt(x, z) - link.y;
+                if (gap >= 0.0f && tri.ContainsXZ(x, z) && (!best || gap < best_gap)) {
+                    best = std::array<float, 2>{x, z};
+                    best_gap = gap;
+                }
+            }
+        }
+        target = best;
+    }
+    move_button->setEnabled(target.has_value());
+    if (!target) {
+        target_label->setText(on_seam ? QString{}
+                                      : tr("The seam doesn't reach Link's height near any of its "
+                                           "vertices."));
+        walk_label->clear();
+        return;
+    }
+    const float dx = (*target)[0] - link.x;
+    const float dz = (*target)[1] - link.z;
+    target_label->setText(tr("X %1  Z %2, %3 units away (seam %4 above Link's feet there)")
+                              .arg((*target)[0], 0, 'f', 5)
+                              .arg((*target)[1], 0, 'f', 5)
+                              .arg(std::hypot(dx, dz), 0, 'f', 5)
+                              .arg(tri.HeightAt((*target)[0], (*target)[1]) - link.y, 0, 'f', 2));
+    const u16 walk_yaw = YawOf(dx, dz);
+    QString walk = tr("direction %1").arg(hex(walk_yaw));
+    if (const auto stick = StickFor(walk_yaw, link)) {
+        walk += tr(", circle pad X %1, Y %2").arg((*stick)[0]).arg((*stick)[1]);
+        if ((*stick)[2] != walk_yaw) {
+            walk += tr(" (gives %1)").arg(hex(static_cast<u16>((*stick)[2])));
+        }
+    }
+    walk_label->setText(walk);
+}
+
+void SeamCalculatorWidget::UpdateClimb(const SeamMath::Triangle& tri, const LinkState& link) {
+    using namespace SeamMath;
+    const auto hex = [](u16 value) {
+        return QStringLiteral("0x%1").arg(value, 4, 16, QLatin1Char('0'));
+    };
+    const double rise = tri.RisePerUnit();
+    const auto [ux, uz] = tri.UphillDirection();
+    const u16 uphill_yaw = YawOf(ux, uz);
+    // Height gained per frame moving at `speed` along `yaw`
+    const auto gain_along = [&](double speed, u16 yaw) {
+        return speed * rise * std::cos(YawToRadians(YawDifference(yaw, uphill_yaw)));
+    };
+    const float here = tri.HeightAt(link.x, link.z);
+    const bool on_seam = tri.ContainsXZ(link.x, link.z) && (link.bg_check_flags & BgCheckGround) &&
+                         std::fabs(here - link.y) < 0.5f;
+
+    // Next frame, at Link's current speed and direction (the game moves Link by
+    // speed * (sin, cos) of his direction)
+    if (!on_seam) {
+        next_frame_label->setText(tr("Link isn't on the seam."));
+    } else if (link.speed == 0.0f) {
+        next_frame_label->setText(tr("Link isn't moving."));
+    } else {
+        const double yaw = YawToRadians(link.yaw);
+        const float next_x = link.x + static_cast<float>(link.speed * std::sin(yaw));
+        const float next_z = link.z + static_cast<float>(link.speed * std::cos(yaw));
+        const float gain = tri.HeightAt(next_x, next_z) - link.y;
+        if (!tri.ContainsXZ(next_x, next_z)) {
+            next_frame_label->setText(
+                Colored(tr("leaves the seam's vertex circles: Link falls off"), "#c03030"));
+        } else if (gain >= FloorCheckHeight) {
+            next_frame_label->setText(
+                Colored(tr("gains %1: too much (50 or more), Link falls off").arg(gain, 0, 'f', 2),
+                        "#c03030"));
+        } else if (gain >= 0.0f) {
+            next_frame_label->setText(Colored(tr("gains %1 ✓").arg(gain, 0, 'f', 2), "#20a020"));
+        } else {
+            next_frame_label->setText(tr("goes down %1").arg(-gain, 0, 'f', 2).toHtmlEscaped());
+        }
+    }
+
+    // The two directions that climb: close to the seam's level line, one each way, tilted slightly
+    // uphill. The angle from the uphill direction is acos(gain / (speed * rise)). Link's actual
+    // speed matters a lot: on a seam it's much lower than on flat ground.
+    const double speed = link.speed > 0.01f ? link.speed : plan_speed_spin->value();
+    const u16 aim_offset =
+        RadiansToYaw(std::acos(std::min(1.0, aim_spin->value() / (speed * rise))));
+    const u16 limit_offset = static_cast<u16>(
+        RadiansToYaw(std::acos(std::min(1.0, FloorCheckHeight / (speed * rise)))) + 1);
+    const double link_gain = gain_along(speed, link.yaw);
+
+    for (std::size_t i = 0; i < way_labels.size(); ++i) {
+        const int side = i == 0 ? 1 : -1;
+        const u16 aim_yaw = static_cast<u16>(uphill_yaw + side * aim_offset);
+        const u16 limit_yaw = static_cast<u16>(uphill_yaw + side * limit_offset);
+        const u16 level_yaw = static_cast<u16>(uphill_yaw + side * 0x4000);
+
+        // Frames until leaving the vertex circles, going this way
+        int frames = 0;
+        double x = link.x;
+        double z = link.z;
+        const double step_x = speed * std::sin(YawToRadians(aim_yaw));
+        const double step_z = speed * std::cos(YawToRadians(aim_yaw));
+        while (frames < 100000 &&
+               tri.ContainsXZ(static_cast<float>(x + step_x), static_cast<float>(z + step_z))) {
+            x += step_x;
+            z += step_z;
+            ++frames;
+        }
+
+        QString text = QStringLiteral("<b>%1</b>").arg(hex(aim_yaw));
+        if (const auto stick = StickFor(aim_yaw, link)) {
+            text += tr(", circle pad <b>X %1, Y %2</b>").arg((*stick)[0]).arg((*stick)[1]);
+        }
+        text += QStringLiteral("<br>") +
+                tr("+%1 per frame at speed %2, %3 frames of room; window %4 to %5")
+                    .arg(gain_along(speed, aim_yaw), 0, 'f', 1)
+                    .arg(speed, 0, 'f', 3)
+                    .arg(frames)
+                    .arg(hex(side > 0 ? limit_yaw : level_yaw))
+                    .arg(hex(side > 0 ? level_yaw : limit_yaw))
+                    .toHtmlEscaped();
+        // Whether Link's direction is in this window (climbing, under 50 per frame)
+        if ((YawDifference(link.yaw, uphill_yaw) > 0) == (side > 0) && link_gain > 0.0 &&
+            link_gain < FloorCheckHeight) {
+            text += QStringLiteral(" ") + Colored(tr("✓ Link's direction"), "#20a020");
+        }
+        way_labels[i]->setText(text);
+    }
 }
 
 void SeamCalculatorWidget::OnEmulationStarting(EmuThread*) {
@@ -633,349 +912,6 @@ bool SeamCalculatorWidget::ParseTriangleFields() {
     }
     triangle = tri;
     return true;
-}
-
-void SeamCalculatorWidget::Update() {
-    const auto link = ReadLink();
-    if (link) {
-        position_label->setText(QStringLiteral("X %1   Y %2   Z %3")
-                                    .arg(link->x, 0, 'f', 4)
-                                    .arg(link->y, 0, 'f', 3)
-                                    .arg(link->z, 0, 'f', 4));
-        const bool ground = link->bg_check_flags & BgCheckGround;
-        floor_label->setText(tr("height %1, %2 (flags 0x%3)")
-                                 .arg(link->floor_height, 0, 'f', 3)
-                                 .arg(ground ? tr("on the ground") : tr("in the air"))
-                                 .arg(link->bg_check_flags, 4, 16, QLatin1Char('0')));
-        motion_label->setText(
-            tr("speed %1, direction 0x%2, camera 0x%3")
-                .arg(link->speed, 0, 'f', 3)
-                .arg(link->yaw, 4, 16, QLatin1Char('0'))
-                .arg(link->camera_yaw
-                         ? QStringLiteral("%1").arg(*link->camera_yaw, 4, 16, QLatin1Char('0'))
-                         : tr("unknown (needs the GlobalContext)")));
-    } else {
-        position_label->setText(emulation_running
-                                    ? tr("Find the GlobalContext, or enter the address of "
-                                         "Link's actor")
-                                    : tr("Not running"));
-        floor_label->clear();
-        motion_label->clear();
-    }
-
-    target.reset();
-    move_button->setEnabled(false);
-    if (!triangle) {
-        triangle_label->setText(
-            tr("Pick a seam from the list, or enter a triangle (vertices, normal and distance as "
-               "stored in the collision)."));
-        vertices_label->clear();
-        height_label->clear();
-        game_floor_label->clear();
-        band_label->clear();
-        target_label->clear();
-        ClearClimb();
-        return;
-    }
-
-    const auto& tri = *triangle;
-    const auto [ux, uz] = tri.UphillDirection();
-    QString info = tri.index >= 0 ? tr("Poly %1: ").arg(tri.index) : QString{};
-    if (!tri.IsStandable()) {
-        info += Colored(tr("faces down or has a normal Y of zero, the floor check never uses it."),
-                        "#c03030");
-    } else {
-        info += tr("rises %1 units per unit in XZ, uphill direction (X %2, Z %3)%4")
-                    .arg(tri.RisePerUnit(), 0, 'f', 1)
-                    .arg(ux, 0, 'f', 4)
-                    .arg(uz, 0, 'f', 4)
-                    .arg(tri.IsSeam() ? QString{} : tr(" (a floor, not a seam)"));
-    }
-    triangle_label->setText(info);
-
-    if (!link || !tri.IsStandable()) {
-        vertices_label->clear();
-        height_label->clear();
-        game_floor_label->clear();
-        band_label->clear();
-        target_label->clear();
-        ClearClimb();
-        return;
-    }
-
-    QStringList distances;
-    for (std::size_t v = 0; v < 3; ++v) {
-        const float distance = tri.VertexDistance(v, link->x, link->z);
-        const QString text = QString::number(distance, 'f', distance < 10.0f ? 4 : 1);
-        distances << (distance < SeamMath::CheckDist
-                          ? Colored(text + QStringLiteral(" ✓"), "#20a020")
-                          : text.toHtmlEscaped());
-    }
-    vertices_label->setText(distances.join(QStringLiteral(" | ")));
-    UpdateClimb(tri, *link);
-
-    const float height = tri.HeightAt(link->x, link->z);
-    const float gap = height - link->y;
-    const bool accepted = tri.ContainsXZ(link->x, link->z);
-    if (accepted) {
-        // The seam is a candidate if it's below the start of the floor ray, and Link is put on it
-        // if it's also at or above his feet (and it's the highest candidate)
-        const float ray_start = link->prev_y + SeamMath::FloorCheckHeight;
-        QString state;
-        if (height >= ray_start) {
-            state = tr("too high: the floor check only sees floors below %1 (previous Y + 50)")
-                        .arg(ray_start, 0, 'f', 2);
-        } else if (gap >= 0.0f) {
-            state =
-                Colored(tr("in pop-up range, below %1 (previous Y + 50)").arg(ray_start, 0, 'f', 2),
-                        "#20a020");
-        } else {
-            state = tr("below Link's feet");
-        }
-        height_label->setText(tr("height %1, %2 %3 Link's Y: %4")
-                                  .arg(height, 0, 'f', 2)
-                                  .arg(std::fabs(gap), 0, 'f', 2)
-                                  .arg(gap >= 0.0f ? tr("above") : tr("below"))
-                                  .arg(state));
-    } else {
-        height_label->setText(
-            tr("Link is outside the seam (plane height here would be %1)").arg(height, 0, 'f', 1));
-    }
-
-    if (accepted && std::fabs(link->floor_height - height) < 0.01f) {
-        game_floor_label->setText(Colored(
-            tr("%1, the game's floor check found this seam").arg(link->floor_height, 0, 'f', 3),
-            "#20a020"));
-    } else {
-        game_floor_label->setText(tr("%1").arg(link->floor_height, 0, 'f', 3));
-    }
-
-    // Where Link pops up onto the seam: from his feet up to the start of the floor check's ray
-    const float band_min = link->y;
-    const float band_max = link->prev_y + SeamMath::FloorCheckHeight;
-    const float band_width = (band_max - band_min) / tri.RisePerUnit();
-    const bool in_band = accepted && height >= band_min && height < band_max;
-    band_label->setText(
-        tr("heights %1 to %2, %3 units wide in XZ%4")
-            .arg(band_min, 0, 'f', 2)
-            .arg(band_max, 0, 'f', 2)
-            .arg(band_width, 0, 'f', band_width < 0.1f ? 5 : 3)
-            .arg(in_band ? QStringLiteral(" — ") + Colored(tr("Link is in it ✓"), "#20a020")
-                         : QString{}));
-
-    // Aim for the middle half of the band: at its edges, rounding of the position (almost one unit
-    // of height per step here) can leave Link just outside of it
-    const float margin = (band_max - band_min) / 4.0f;
-    target = SeamMath::ClosestPointInHeightRange(tri, link->x, link->z, band_min + margin,
-                                                 band_max - margin);
-    move_button->setEnabled(target.has_value());
-    if (in_band) {
-        target_label->setText(tr("Link is in the band."));
-    } else if (!target) {
-        target_label->setText(tr("The seam doesn't reach these heights near any of its vertices."));
-    } else {
-        const float dx = (*target)[0] - link->x;
-        const float dz = (*target)[1] - link->z;
-        target_label->setText(
-            tr("X %1   Z %2   (move X %3, Z %4: %5 units; seam height there %6). Walking can't "
-               "make such a small move directly: use Way 1 or 2 below.")
-                .arg((*target)[0], 0, 'f', 5)
-                .arg((*target)[1], 0, 'f', 5)
-                .arg(dx, 0, 'f', 5)
-                .arg(dz, 0, 'f', 5)
-                .arg(std::hypot(dx, dz), 0, 'f', 5)
-                .arg(tri.HeightAt((*target)[0], (*target)[1]), 0, 'f', 2));
-    }
-}
-
-void SeamCalculatorWidget::ClearClimb() {
-    next_frame_label->clear();
-    for (QLabel* label : direction_labels) {
-        label->clear();
-    }
-}
-
-void SeamCalculatorWidget::UpdateClimb(const SeamMath::Triangle& tri, const LinkState& link) {
-    using namespace SeamMath;
-    const double rise = tri.RisePerUnit();
-    const auto [ux, uz] = tri.UphillDirection();
-    const u16 uphill_yaw = YawOf(ux, uz);
-    // Height gained per frame moving at `speed` along `yaw`
-    const auto gain_along = [&](double speed, u16 yaw) {
-        return speed * rise * std::cos(YawToRadians(YawDifference(yaw, uphill_yaw)));
-    };
-    const auto hex = [](u16 value) {
-        return QStringLiteral("0x%1").arg(value, 4, 16, QLatin1Char('0'));
-    };
-
-    // Link is either on the seam (climbing it), or still on other ground (getting onto it). The
-    // band of seam heights Link is put on is from his feet up to his previous Y + 50.
-    const float band_min = link.y;
-    const float band_max = link.prev_y + FloorCheckHeight;
-    const float band_middle = (band_min + band_max) / 2.0f;
-    const float here = tri.HeightAt(link.x, link.z);
-    const bool on_seam = tri.ContainsXZ(link.x, link.z) && (link.bg_check_flags & BgCheckGround) &&
-                         std::fabs(here - link.y) < 0.5f;
-
-    // Next frame, at Link's current speed and direction (the game moves Link by
-    // speed * (sin, cos) of his direction)
-    if (link.speed == 0.0f) {
-        next_frame_label->setText(tr("Link isn't moving."));
-    } else {
-        const double yaw = YawToRadians(link.yaw);
-        const float next_x = link.x + static_cast<float>(link.speed * std::sin(yaw));
-        const float next_z = link.z + static_cast<float>(link.speed * std::cos(yaw));
-        const float next = tri.HeightAt(next_x, next_z);
-        const float gain = next - link.y;
-        if (!tri.ContainsXZ(next_x, next_z)) {
-            next_frame_label->setText(
-                on_seam ? Colored(tr("leaves the seam's vertex circles: Link falls off"), "#c03030")
-                        : tr("outside the seam's vertex circles"));
-        } else if (next >= band_max) {
-            next_frame_label->setText(
-                on_seam ? Colored(tr("gains %1: too much (50 or more), Link falls off")
-                                      .arg(gain, 0, 'f', 2),
-                                  "#c03030")
-                        : tr("seam %1 above the band (seam height %2)")
-                              .arg(next - band_max, 0, 'f', 2)
-                              .arg(next, 0, 'f', 2));
-        } else if (next >= band_min) {
-            next_frame_label->setText(
-                on_seam ? Colored(tr("gains %1 ✓").arg(gain, 0, 'f', 2), "#20a020")
-                        : Colored(tr("seam height %1 is in the band: Link gets onto the seam ✓")
-                                      .arg(next, 0, 'f', 2),
-                                  "#20a020"));
-        } else if (!on_seam && here >= band_max) {
-            next_frame_label->setText(
-                Colored(tr("skips over the band (seam height %1 to %2): move more slowly across it")
-                            .arg(here, 0, 'f', 1)
-                            .arg(next, 0, 'f', 1),
-                        "#c03030"));
-        } else {
-            next_frame_label->setText(on_seam ? tr("goes down %1").arg(-gain, 0, 'f', 2)
-                                              : tr("seam %1 below Link's feet (seam height %2)")
-                                                    .arg(band_min - next, 0, 'f', 2)
-                                                    .arg(next, 0, 'f', 2));
-        }
-    }
-
-    // The two ways to go: close to the seam's level line, one each way, tilted slightly uphill to
-    // climb (or towards the band to get onto the seam), so that the seam height under Link changes
-    // by `change` per frame. The angle from the uphill direction is acos(change / (speed * rise)).
-    const double speed = std::max<double>(link.speed, plan_speed_spin->value());
-    const double change = on_seam || here < band_middle ? aim_spin->value() : -aim_spin->value();
-    // Most the seam height may change per frame: under 50 when climbing, and less than the band's
-    // height when getting onto it (or Link could skip over it)
-    const double max_change = on_seam ? FloorCheckHeight : band_max - band_min;
-    const u16 aim_offset_up =
-        RadiansToYaw(std::acos(std::min(1.0, std::fabs(change) / (speed * rise))));
-    const u16 limit_offset_up = RadiansToYaw(std::acos(std::min(1.0, max_change / (speed * rise))));
-    // Offsets from the uphill direction (0x4000 = along the level line)
-    const u16 aim_offset = change > 0 ? aim_offset_up : static_cast<u16>(0x8000 - aim_offset_up);
-    const u16 limit_offset = change > 0 ? static_cast<u16>(limit_offset_up + 1)
-                                        : static_cast<u16>(0x8000 - limit_offset_up - 1);
-    const int magnitude = stick_magnitude_spin->value();
-
-    for (std::size_t i = 0; i < direction_labels.size(); ++i) {
-        const int side = i == 0 ? 1 : -1;
-        const u16 aim_yaw = static_cast<u16>(uphill_yaw + side * aim_offset);
-        const u16 limit_yaw = static_cast<u16>(uphill_yaw + side * limit_offset);
-        const u16 level_yaw = static_cast<u16>(uphill_yaw + side * 0x4000);
-        const u16 window_from = (side > 0) == (change > 0) ? limit_yaw : level_yaw;
-        const u16 window_to = (side > 0) == (change > 0) ? level_yaw : limit_yaw;
-
-        // Frames until leaving the vertex circles (or, getting onto the seam, reaching the band)
-        int frames = 0;
-        bool reaches_band = false;
-        double x = link.x;
-        double z = link.z;
-        const double step_x = speed * std::sin(YawToRadians(aim_yaw));
-        const double step_z = speed * std::cos(YawToRadians(aim_yaw));
-        while (frames < 100000) {
-            const float next_x = static_cast<float>(x + step_x);
-            const float next_z = static_cast<float>(z + step_z);
-            if (!tri.ContainsXZ(next_x, next_z)) {
-                break;
-            }
-            x += step_x;
-            z += step_z;
-            ++frames;
-            const float height = tri.HeightAt(next_x, next_z);
-            if (!on_seam && height >= band_min && height < band_max) {
-                reaches_band = true;
-                break;
-            }
-        }
-        const double per_frame = gain_along(speed, aim_yaw);
-        const u16 tilt = static_cast<u16>(std::abs(0x4000 - static_cast<int>(aim_offset)));
-        QString text;
-        if (on_seam) {
-            text = tr("direction %1, %2 uphill of the level line (window %3 to %4); gains %5 "
-                      "per frame; %6 frames of room (about %7 higher)")
-                       .arg(hex(aim_yaw), hex(tilt), hex(window_from), hex(window_to))
-                       .arg(per_frame, 0, 'f', 1)
-                       .arg(frames)
-                       .arg(per_frame * frames, 0, 'f', 0)
-                       .toHtmlEscaped();
-        } else {
-            text = tr("direction %1, %2 towards the band from the level line (window %3 to %4); "
-                      "seam height changes %5 per frame; %6")
-                       .arg(hex(aim_yaw), hex(tilt), hex(window_from), hex(window_to))
-                       .arg(per_frame, 0, 'f', 1)
-                       .arg(reaches_band
-                                ? tr("reaches the band in %1 frames").arg(frames)
-                                : tr("leaves the vertex circles after %1 frames first").arg(frames))
-                       .toHtmlEscaped();
-        }
-        // Whether Link's direction is in this window
-        const double link_change = gain_along(speed, link.yaw);
-        if ((YawDifference(link.yaw, uphill_yaw) > 0) == (side > 0) &&
-            (change > 0 ? link_change > 0 : link_change < 0) &&
-            std::fabs(link_change) < max_change) {
-            text += QStringLiteral("<br>") +
-                    Colored(tr("Link's direction is in this window ✓"), "#20a020");
-        }
-
-        // Circle pad position giving that direction: the stick angle is the direction minus the
-        // camera's input yaw (Player_ProcessControlStick)
-        if (link.camera_yaw) {
-            const u16 stick_angle = static_cast<u16>(aim_yaw - *link.camera_yaw);
-            const double angle = YawToRadians(stick_angle);
-            const int ideal_x = static_cast<int>(std::lround(-magnitude * std::sin(angle)));
-            const int ideal_y = static_cast<int>(std::lround(magnitude * std::cos(angle)));
-            int best_x = ideal_x;
-            int best_y = ideal_y;
-            int best_error = std::numeric_limits<int>::max();
-            for (int dy = -4; dy <= 4; ++dy) {
-                for (int dx = -4; dx <= 4; ++dx) {
-                    const int px = ideal_x + dx;
-                    const int py = ideal_y + dy;
-                    if (px * px + py * py > 156 * 156) {
-                        continue;
-                    }
-                    const int error = std::abs(YawDifference(StickAngle(px, py), stick_angle));
-                    if (error < best_error) {
-                        best_error = error;
-                        best_x = px;
-                        best_y = py;
-                    }
-                }
-            }
-            const u16 resulting_yaw =
-                static_cast<u16>(*link.camera_yaw + StickAngle(best_x, best_y));
-            text += QStringLiteral("<br>") +
-                    tr("Circle pad X %1, Y %2 (direction %3, gains %4 per frame)")
-                        .arg(best_x)
-                        .arg(best_y)
-                        .arg(hex(resulting_yaw))
-                        .arg(gain_along(speed, resulting_yaw), 0, 'f', 1)
-                        .toHtmlEscaped();
-        } else {
-            text += QStringLiteral("<br>") +
-                    tr("Find the GlobalContext to get circle pad positions.").toHtmlEscaped();
-        }
-        direction_labels[i]->setText(text);
-    }
 }
 
 void SeamCalculatorWidget::MoveLinkToTarget() {

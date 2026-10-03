@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <array>
 #include <optional>
 #include <vector>
 #include <QDockWidget>
@@ -24,10 +25,10 @@ class System;
 }
 
 /**
- * Helps getting onto "invisible seams" in Ocarina of Time 3D: given the player actor's address and
- * a seam triangle (picked from the scene's collision file or entered by hand), shows live where
- * Link is relative to the seam, the seam's height under him and where to move to be at a given
- * height on it.
+ * Helps getting onto and climbing "invisible seams" in Ocarina of Time 3D: with the scene's
+ * collision and the game's GlobalContext (for Link's actor and the camera), shows live where Link
+ * is relative to a seam, where and in which direction to walk to get onto it, and the directions
+ * (and circle pad positions) that climb it.
  */
 class SeamCalculatorWidget : public QDockWidget {
     Q_OBJECT
@@ -55,28 +56,32 @@ private:
         std::optional<u16> camera_yaw; ///< Input yaw of the active camera, if known
     };
 
-    QWidget* CreateLinkGroup();
-    QWidget* CreateTriangleGroup();
-    QWidget* CreateLiveGroup();
+    QWidget* CreateSetupGroup();
+    QWidget* CreateMountGroup();
     QWidget* CreateClimbGroup();
 
     std::optional<VAddr> ContextAddress() const;
     std::optional<VAddr> ActorAddress() const;
     std::optional<u32> ReadU32(VAddr address) const;
     std::optional<u16> ReadU16(VAddr address) const;
+    std::optional<float> ReadFloat(VAddr address) const;
+    std::optional<LinkState> ReadLink() const;
     /// Finds the address of the GlobalContext by scanning memory (see the .cpp)
     void FindGlobalContext();
-    std::optional<LinkState> ReadLink() const;
-    std::optional<float> ReadFloat(VAddr address) const;
 
     void LoadCollision(const QString& path);
     void FindSeams();
     void SelectTriangle(const SeamMath::Triangle& triangle);
     /// Reads the triangle from the fields, returns false if they are invalid
     bool ParseTriangleFields();
+
     void Update();
+    void UpdateMount(const SeamMath::Triangle& tri, const LinkState& link);
     void UpdateClimb(const SeamMath::Triangle& tri, const LinkState& link);
-    void ClearClimb();
+    void ClearLive();
+    /// Circle pad position (in TAS Input units) that makes Link go along `yaw`, if the camera is
+    /// known. Returns {x, y, resulting yaw}.
+    std::optional<std::array<int, 3>> StickFor(u16 yaw, const LinkState& link) const;
     void MoveLinkToTarget();
     void UpdateTimerState();
     void SaveSettings() const;
@@ -87,32 +92,31 @@ private:
     std::optional<SeamMath::Triangle> triangle;
     std::optional<std::array<float, 2>> target;
 
+    // Setup
     QLineEdit* context_edit;
-    QLineEdit* address_edit;
-    QLabel* motion_label;
-    QLabel* position_label;
-    QLabel* floor_label;
-
     QLabel* file_label;
     QSpinBox* radius_spin;
     QTableWidget* seam_table;
+    QWidget* details_widget;
+    QLineEdit* address_edit;
     std::array<QLineEdit*, 3> vertex_edits{};
     QLineEdit* normal_edit;
     QLineEdit* dist_edit;
     QLabel* triangle_label;
+    QLabel* link_label;
 
-    QLabel* vertices_label;
-    QLabel* height_label;
-    QLabel* game_floor_label;
-    QLabel* band_label;
+    // Getting onto the seam
+    QLabel* mount_status_label;
     QLabel* target_label;
+    QLabel* walk_label;
     QPushButton* move_button;
 
+    // Climbing
     QLabel* next_frame_label;
-    QDoubleSpinBox* plan_speed_spin;
+    std::array<QLabel*, 2> way_labels{};
     QDoubleSpinBox* aim_spin;
     QSpinBox* stick_magnitude_spin;
-    std::array<QLabel*, 2> direction_labels{};
+    QDoubleSpinBox* plan_speed_spin;
 
     QString collision_path;
     QTimer update_timer;
