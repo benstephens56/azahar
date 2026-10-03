@@ -121,7 +121,13 @@ private:
     QLabel* next_frame_label;
     QLabel* check_label;
     QPushButton* use_floor_button;
-    QDoubleSpinBox* climb_speed_spin;
+    QLabel* options_label;
+    QDoubleSpinBox* climb_step_spin;
+    /// Cached searches (they're slow to redo every update): what they were computed for
+    std::array<double, 4> climb_lines_key{};
+    std::vector<SeamMath::ClimbLine> climb_lines;
+    std::array<double, 4> mount_climb_key{};
+    std::optional<SeamMath::MountClimb> mount_climb;
     /// Distance Link moves per frame per unit of speed, as last measured
     double step_ratio = 1.0;
     std::array<QLabel*, 2> way_labels{};

@@ -349,43 +349,79 @@ struct ClimbLine {
     double gain;   ///< Height gained over that length
 };
 
-/**
- * The straight line from (x, z) that gains the most height before leaving the seam, among the
- * directions where the seam rises at most `max_rise` per unit walked (so that at a given speed,
- * Link gains under 50 per frame).
- */
-inline std::optional<ClimbLine> BestClimbLine(
-    const Triangle& tri, double x, double z,
-    double max_rise = std::numeric_limits<double>::infinity()) {
+/// Every direction from (x, z) that climbs the seam, with how far it stays on it
+inline std::vector<ClimbLine> AllClimbLines(const Triangle& tri, double x, double z) {
+    std::vector<ClimbLine> lines;
     const double rise = tri.RisePerUnit();
     if (!std::isfinite(rise) || rise <= 0.0) {
-        return std::nullopt;
+        return lines;
     }
     const auto [ux, uz] = tri.UphillDirection();
-    const auto line = [&](u16 yaw) {
+    for (int yaw = 0; yaw < 0x10000; ++yaw) {
         const double angle = YawToRadians(yaw);
         const double dx = std::sin(angle);
         const double dz = std::cos(angle);
         const double rise_along = rise * (dx * ux + dz * uz);
-        if (rise_along <= 0.0 || rise_along > max_rise) {
-            return ClimbLine{yaw, 0.0, -1.0};
+        if (rise_along <= 0.0) {
+            continue;
         }
         const double length = StraightLineLength(tri, x, z, dx, dz);
-        return ClimbLine{yaw, length, rise_along * length};
-    };
-    // Every direction: the ones that climb without gaining too much per frame can be a narrow
-    // range right next to the seam's level direction
-    std::optional<ClimbLine> best;
-    for (int yaw = 0; yaw < 0x10000; ++yaw) {
-        const auto candidate = line(static_cast<u16>(yaw));
-        if (!best || candidate.gain > best->gain) {
-            best = candidate;
+        if (length > 0.0) {
+            lines.push_back(ClimbLine{static_cast<u16>(yaw), length, rise_along * length});
         }
     }
-    if (best->gain <= 0.0) {
+    return lines;
+}
+
+/**
+ * Among `lines`, the one that climbs the most where the seam rises at most `max_rise` per unit
+ * walked (so that Link, moving a given distance per frame, gains under 50 per frame). Each line is
+ * judged by the worst of the directions within `tolerance` of it, so that it still works when Link
+ * goes slightly off it (the best lines can be right next to ones crossing a gap in the seam). Of
+ * the lines gaining almost as much (99%), the gentlest one, which leaves the most room for Link's
+ * speed.
+ */
+inline std::optional<ClimbLine> PickClimbLine(std::span<const ClimbLine> lines, double max_rise,
+                                              int tolerance = 8) {
+    const auto rise_of = [](const ClimbLine& line) { return line.gain / line.length; };
+    std::vector<double> gain_by_yaw(0x10000, 0.0);
+    for (const auto& line : lines) {
+        gain_by_yaw[line.yaw] = line.gain;
+    }
+    std::vector<double> robust(lines.size());
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        double worst = lines[i].gain;
+        for (int off = -tolerance; off <= tolerance; ++off) {
+            worst = std::min(worst, gain_by_yaw[static_cast<u16>(lines[i].yaw + off)]);
+        }
+        robust[i] = worst;
+    }
+    std::optional<std::size_t> best;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        if (rise_of(lines[i]) <= max_rise && (!best || robust[i] > robust[*best])) {
+            best = i;
+        }
+    }
+    if (!best || robust[*best] <= 0.0) {
         return std::nullopt;
     }
-    return best;
+    std::size_t gentlest = *best;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        if (robust[i] >= 0.99 * robust[*best] && rise_of(lines[i]) < rise_of(lines[gentlest])) {
+            gentlest = i;
+        }
+    }
+    return lines[gentlest];
+}
+
+/**
+ * The straight line from (x, z) that gains the most height before leaving the seam, among the
+ * directions where the seam rises at most `max_rise` per unit walked (see PickClimbLine).
+ */
+inline std::optional<ClimbLine> BestClimbLine(
+    const Triangle& tri, double x, double z,
+    double max_rise = std::numeric_limits<double>::infinity()) {
+    return PickClimbLine(AllClimbLines(tri, x, z), max_rise);
 }
 
 /// Where Link can step onto a seam from a floor: the seam is at the floor's height there

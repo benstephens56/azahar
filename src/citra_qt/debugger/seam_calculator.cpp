@@ -120,7 +120,7 @@ SeamCalculatorWidget::SeamCalculatorWidget(Core::System& system_, QWidget* paren
     address_edit->setText(settings.value(QStringLiteral("actor_address")).toString());
     radius_spin->setValue(settings.value(QStringLiteral("radius"), 200).toInt());
     stick_magnitude_spin->setValue(settings.value(QStringLiteral("stick_magnitude2"), 90).toInt());
-    climb_speed_spin->setValue(settings.value(QStringLiteral("climb_speed"), 0.2).toDouble());
+    climb_step_spin->setValue(settings.value(QStringLiteral("climb_step"), 0.03).toDouble());
     const QString path = settings.value(QStringLiteral("collision_file")).toString();
     if (!path.isEmpty() && QFile::exists(path)) {
         LoadCollision(path);
@@ -141,7 +141,7 @@ void SeamCalculatorWidget::SaveSettings() const {
     settings.setValue(QStringLiteral("actor_address"), address_edit->text());
     settings.setValue(QStringLiteral("radius"), radius_spin->value());
     settings.setValue(QStringLiteral("stick_magnitude2"), stick_magnitude_spin->value());
-    settings.setValue(QStringLiteral("climb_speed"), climb_speed_spin->value());
+    settings.setValue(QStringLiteral("climb_step"), climb_step_spin->value());
     settings.setValue(QStringLiteral("collision_file"), collision_path);
 }
 
@@ -327,6 +327,12 @@ QWidget* SeamCalculatorWidget::CreateClimbGroup() {
                                  "height before leaving the seam's vertex circles"));
     form->addRow(tr("Best line"), way_labels[0]);
     form->addRow(tr("Stick up"), way_labels[1]);
+    options_label = new QLabel(group);
+    options_label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    options_label->setToolTip(tr("The best line from Link's position for each step per frame "
+                                 "(XZ distance Link moves per frame), and the step it must stay "
+                                 "under"));
+    form->addRow(tr("Slower steps"), options_label);
     layout->addLayout(form);
 
     use_floor_button = new QPushButton(tr("Use the Triangle Link Stands On"), group);
@@ -356,27 +362,31 @@ QWidget* SeamCalculatorWidget::CreateClimbGroup() {
     settings_row->addStretch();
     layout->addLayout(settings_row);
 
-    auto* speed_row = new QHBoxLayout;
-    speed_row->addWidget(new QLabel(tr("Climbing speed"), group));
-    climb_speed_spin = new QDoubleSpinBox(group);
-    climb_speed_spin->setRange(0.0001, 30.0);
-    climb_speed_spin->setDecimals(4);
-    climb_speed_spin->setSingleStep(0.01);
-    climb_speed_spin->setToolTip(
-        tr("Link's speed (speedXZ) while climbing. Link falls off when he gains 50 or more in a "
-           "frame, so the slower he goes, the more steeply he can climb: the best line is the one "
-           "that gains the most at this speed."));
-    connect(climb_speed_spin, &QDoubleSpinBox::valueChanged, this, [this] { Update(); });
-    speed_row->addWidget(climb_speed_spin);
-    auto* use_speed_button = new QPushButton(tr("Use Link's Speed"), group);
-    connect(use_speed_button, &QPushButton::clicked, this, [this] {
-        if (const auto link = ReadLink(); link && link->speed > 0.0f) {
-            climb_speed_spin->setValue(link->speed);
+    auto* step_row = new QHBoxLayout;
+    step_row->addWidget(new QLabel(tr("Slowest step per frame"), group));
+    climb_step_spin = new QDoubleSpinBox(group);
+    climb_step_spin->setRange(0.0001, 10.0);
+    climb_step_spin->setDecimals(4);
+    climb_step_spin->setSingleStep(0.005);
+    climb_step_spin->setToolTip(
+        tr("The smallest distance (in XZ) you can make Link move per frame while climbing, see "
+           "\"Last frame\" in the game check. Link falls off when he gains 50 or more in a frame, "
+           "so the slower he goes, the steeper (and higher) the lines he can climb."));
+    connect(climb_step_spin, &QDoubleSpinBox::valueChanged, this, [this] { Update(); });
+    step_row->addWidget(climb_step_spin);
+    auto* use_step_button = new QPushButton(tr("Use Last Frame's Step"), group);
+    connect(use_step_button, &QPushButton::clicked, this, [this] {
+        if (const auto link = ReadLink()) {
+            const double step = std::hypot(static_cast<double>(link->x) - link->prev_x,
+                                           static_cast<double>(link->z) - link->prev_z);
+            if (step > 0.0) {
+                climb_step_spin->setValue(step);
+            }
         }
     });
-    speed_row->addWidget(use_speed_button);
-    speed_row->addStretch();
-    layout->addLayout(speed_row);
+    step_row->addWidget(use_step_button);
+    step_row->addStretch();
+    layout->addLayout(step_row);
     return group;
 }
 
@@ -384,7 +394,7 @@ double SeamCalculatorWidget::ClimbMaxRise() const {
     // Link falls off if he gains 50 or more in a frame. With a margin, as his speed changes a
     // little from frame to frame.
     constexpr double SpeedMargin = 0.9;
-    return SpeedMargin * SeamMath::FloorCheckHeight / (climb_speed_spin->value() * step_ratio);
+    return SpeedMargin * SeamMath::FloorCheckHeight / climb_step_spin->value();
 }
 
 std::optional<std::array<int, 3>> SeamCalculatorWidget::StickFor(u16 yaw,
@@ -425,7 +435,7 @@ std::optional<std::array<int, 3>> SeamCalculatorWidget::StickFor(u16 yaw,
 
 void SeamCalculatorWidget::ClearLive() {
     for (QLabel* label : {mount_status_label, target_label, walk_label, next_frame_label,
-                          check_label, way_labels[0], way_labels[1]}) {
+                          check_label, way_labels[0], way_labels[1], options_label}) {
         label->clear();
     }
     target.reset();
@@ -592,7 +602,13 @@ void SeamCalculatorWidget::UpdateMount(const SeamMath::Triangle& tri, const Link
     // climbing speed
     std::optional<MountClimb> climb;
     if (!on_seam) {
-        climb = BestMountClimb(tri, collision, ClimbMaxRise());
+        const std::array<double, 4> key{static_cast<double>(tri.index), tri.dist,
+                                        static_cast<double>(collision.size()), ClimbMaxRise()};
+        if (key != mount_climb_key) {
+            mount_climb_key = key;
+            mount_climb = BestMountClimb(tri, collision, ClimbMaxRise());
+        }
+        climb = mount_climb;
     }
     if (climb) {
         target = climb->spot.point;
@@ -677,12 +693,12 @@ void SeamCalculatorWidget::UpdateMount(const SeamMath::Triangle& tri, const Link
                                               .arg(std::hypot(dx, dz), 0, 'f', 5);
     if (climb) {
         const double rise_along = climb->line.gain / climb->line.length;
-        target_text +=
-            QStringLiteral("\n") + tr("Then face %1 and hold up: +%2 over %3 units, speed under %4")
-                                       .arg(hex(climb->line.yaw))
-                                       .arg(climb->line.gain, 0, 'f', 0)
-                                       .arg(climb->line.length, 0, 'f', 3)
-                                       .arg(FloorCheckHeight / rise_along / step_ratio, 0, 'f', 4);
+        target_text += QStringLiteral("\n") +
+                       tr("Then face %1 and hold up: +%2 over %3 units, step under %4 per frame")
+                           .arg(hex(climb->line.yaw))
+                           .arg(climb->line.gain, 0, 'f', 0)
+                           .arg(climb->line.length, 0, 'f', 3)
+                           .arg(FloorCheckHeight / rise_along, 0, 'f', 4);
     }
     target_label->setText(target_text);
     const u16 walk_yaw = YawOf(dx, dz);
@@ -738,46 +754,63 @@ void SeamCalculatorWidget::UpdateClimb(const SeamMath::Triangle& tri, const Link
         }
     }
 
-    // The straight line that gains the most height: how far Link can walk before leaving the
+    // The straight lines that gain the most height: how far Link can walk before leaving the
     // seam (its triangle or vertex circles), times how much the seam rises per unit in that
-    // direction. Link falls off if he gains 50 or more in a frame, so at the climbing speed only
-    // directions close to the seam's level direction work (with a margin, as his speed changes a
-    // little from frame to frame).
-    const double speed = climb_speed_spin->value();
-    const double step = speed * step_ratio;
-    const auto best = BestClimbLine(tri, link.x, link.z, ClimbMaxRise());
+    // direction. Link falls off if he gains 50 or more in a frame, so the steeper the line, the
+    // slower he has to walk it.
+    const std::array<double, 4> key{static_cast<double>(tri.index), tri.dist, link.x, link.z};
+    if (key != climb_lines_key) {
+        climb_lines_key = key;
+        climb_lines = AllClimbLines(tri, link.x, link.z);
+    }
+    const double slowest = climb_step_spin->value();
+    const auto best = PickClimbLine(climb_lines, ClimbMaxRise());
     if (!best) {
         way_labels[0]->setText(
             (tri.ContainsXZ(link.x, link.z)
-                 ? tr("No straight line climbs from here at speed %1.").arg(speed)
+                 ? tr("No straight line climbs from here with steps of %1.").arg(slowest)
                  : tr("Link is off the seam: get on it first (the target above comes with the "
                       "direction to climb from there)."))
                 .toHtmlEscaped());
         way_labels[1]->clear();
+        options_label->clear();
         return;
     }
     const double rise_along = best->gain / best->length; // Height per unit walked along it
-    const double max_speed = FloorCheckHeight / rise_along / step_ratio;
-    const double per_frame = step * rise_along;
     const double end_x = link.x + best->length * std::sin(YawToRadians(best->yaw));
     const double end_z = link.z + best->length * std::cos(YawToRadians(best->yaw));
     QString text = tr("<b>%1</b>: +%2 over %3 units")
                        .arg(hex(best->yaw))
                        .arg(best->gain, 0, 'f', 0)
                        .arg(best->length, 0, 'f', 3);
-    text += QStringLiteral("<br>") +
-            tr("At speed %1: +%2 per frame for %3 frames; speed must stay under %4")
-                .arg(speed, 0, 'f', 4)
-                .arg(per_frame, 0, 'f', 1)
-                .arg(std::floor(best->length / step), 0, 'f', 0)
-                .arg(max_speed, 0, 'f', 4)
-                .toHtmlEscaped();
+    text += QStringLiteral("<br>") + tr("Step must stay under %1 per frame (+%2 per frame at %3)")
+                                         .arg(FloorCheckHeight / rise_along, 0, 'f', 4)
+                                         .arg(slowest * rise_along, 0, 'f', 1)
+                                         .arg(slowest, 0, 'f', 4)
+                                         .toHtmlEscaped();
     text += QStringLiteral("<br>") + tr("Ends at X %1  Z %2 (seam height %3); level direction %4")
                                          .arg(end_x, 0, 'f', 3)
                                          .arg(end_z, 0, 'f', 3)
                                          .arg(link.y + best->gain, 0, 'f', 0)
                                          .arg(hex(static_cast<u16>(uphill_yaw + 0x4000)))
                                          .toHtmlEscaped();
+
+    // The best lines for other step sizes, to see what walking slower would give
+    QStringList options;
+    std::optional<u16> previous;
+    for (const double step : {0.2, 0.1, 0.05, 0.03, 0.02, 0.01, 0.005, 0.002}) {
+        const auto line = PickClimbLine(climb_lines, 0.9 * FloorCheckHeight / step);
+        if (!line || line->yaw == previous) {
+            continue;
+        }
+        previous = line->yaw;
+        options << tr("step %1: %2 +%3 (under %4)")
+                       .arg(step)
+                       .arg(hex(line->yaw))
+                       .arg(line->gain, 0, 'f', 0)
+                       .arg(FloorCheckHeight / (line->gain / line->length), 0, 'f', 4);
+    }
+    options_label->setText(options.join(QStringLiteral("\n")));
     way_labels[0]->setText(text);
 
     // With the stick straight up, Link goes along the camera's input yaw
@@ -803,8 +836,8 @@ void SeamCalculatorWidget::UpdateClimb(const SeamMath::Triangle& tri, const Link
                            .arg(own_gain, 0, 'f', 0)
                            .arg(length, 0, 'f', 3);
     if (own_gain > 0.0 && length > 0.0) {
-        own_text += tr(", speed must stay under %1")
-                        .arg(FloorCheckHeight / (own_gain / length) / step_ratio, 0, 'f', 4);
+        own_text +=
+            tr(", step must stay under %1").arg(FloorCheckHeight / (own_gain / length), 0, 'f', 4);
     }
     stick_text += QStringLiteral("<br>") + own_text.toHtmlEscaped();
     way_labels[1]->setText(stick_text);
