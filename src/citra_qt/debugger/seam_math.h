@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <span>
 #include <vector>
@@ -263,6 +264,97 @@ inline std::optional<std::array<float, 2>> ClosestPointInHeightRange(const Trian
             const double t = std::clamp(0.0, center_t - half, center_t + half);
             consider(lx + wx * t, lz + wz * t);
         }
+    }
+    return best;
+}
+
+/**
+ * How far a straight line from (x, z) along the (unit) direction stays where the floor check
+ * accepts the seam: inside the union of its vertex circles.
+ */
+inline double StraightLineLength(const Triangle& tri, double x, double z, double dir_x,
+                                 double dir_z) {
+    const double radius = CheckDist * 0.999;
+    std::array<std::array<double, 2>, 3> intervals{};
+    std::size_t count = 0;
+    for (const auto& v : tri.vertices) {
+        // |P + t D - C|^2 = r^2
+        const double px = x - v[0];
+        const double pz = z - v[2];
+        const double b = dir_x * px + dir_z * pz;
+        const double c = px * px + pz * pz - radius * radius;
+        const double disc = b * b - c;
+        if (disc < 0.0) {
+            continue;
+        }
+        const double root = std::sqrt(disc);
+        const double t_out = -b + root;
+        if (t_out <= 0.0) {
+            continue;
+        }
+        intervals[count++] = {-b - root, t_out};
+    }
+    std::sort(intervals.begin(), intervals.begin() + count);
+    double reach = 0.0;
+    bool started = false;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (intervals[i][0] > reach + 1e-9) {
+            break;
+        }
+        reach = std::max(reach, intervals[i][1]);
+        started = true;
+    }
+    return started ? reach : 0.0;
+}
+
+/// A straight line to walk along a seam
+struct ClimbLine {
+    u16 yaw;       ///< Direction
+    double length; ///< How far it stays on the seam
+    double gain;   ///< Height gained over that length
+};
+
+/**
+ * The straight line from (x, z) that gains the most height before leaving the seam, among the
+ * directions where the seam rises at most `max_rise` per unit walked (so that at a given speed,
+ * Link gains under 50 per frame).
+ */
+inline std::optional<ClimbLine> BestClimbLine(
+    const Triangle& tri, double x, double z,
+    double max_rise = std::numeric_limits<double>::infinity()) {
+    const double rise = tri.RisePerUnit();
+    if (!std::isfinite(rise) || rise <= 0.0) {
+        return std::nullopt;
+    }
+    const auto [ux, uz] = tri.UphillDirection();
+    const auto line = [&](u16 yaw) {
+        const double angle = YawToRadians(yaw);
+        const double dx = std::sin(angle);
+        const double dz = std::cos(angle);
+        const double rise_along = rise * (dx * ux + dz * uz);
+        if (rise_along > max_rise) {
+            return ClimbLine{yaw, 0.0, -1.0};
+        }
+        const double length = StraightLineLength(tri, x, z, dx, dz);
+        return ClimbLine{yaw, length, rise_along * length};
+    };
+    // Coarse search over all directions, then refine around the best one
+    std::optional<ClimbLine> best;
+    for (int yaw = 0; yaw < 0x10000; yaw += 16) {
+        const auto candidate = line(static_cast<u16>(yaw));
+        if (!best || candidate.gain > best->gain) {
+            best = candidate;
+        }
+    }
+    const int center = best->yaw;
+    for (int offset = -24; offset <= 24; ++offset) {
+        const auto candidate = line(static_cast<u16>(center + offset));
+        if (candidate.gain > best->gain) {
+            best = candidate;
+        }
+    }
+    if (best->gain <= 0.0) {
+        return std::nullopt;
     }
     return best;
 }

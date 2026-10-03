@@ -13,7 +13,6 @@
 #include "common/common_types.h"
 
 class EmuThread;
-class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -114,9 +113,7 @@ private:
     // Climbing
     QLabel* next_frame_label;
     std::array<QLabel*, 2> way_labels{};
-    QDoubleSpinBox* aim_spin;
     QSpinBox* stick_magnitude_spin;
-    QDoubleSpinBox* plan_speed_spin;
 
     QString collision_path;
     QTimer update_timer;

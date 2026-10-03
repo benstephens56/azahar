@@ -6,7 +6,6 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
-#include <QDoubleSpinBox>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -113,9 +112,7 @@ SeamCalculatorWidget::SeamCalculatorWidget(Core::System& system_, QWidget* paren
     context_edit->setText(settings.value(QStringLiteral("global_context")).toString());
     address_edit->setText(settings.value(QStringLiteral("actor_address")).toString());
     radius_spin->setValue(settings.value(QStringLiteral("radius"), 200).toInt());
-    aim_spin->setValue(settings.value(QStringLiteral("aim_gain2"), 30.0).toDouble());
     stick_magnitude_spin->setValue(settings.value(QStringLiteral("stick_magnitude2"), 90).toInt());
-    plan_speed_spin->setValue(settings.value(QStringLiteral("plan_speed2"), 0.25).toDouble());
     const QString path = settings.value(QStringLiteral("collision_file")).toString();
     if (!path.isEmpty() && QFile::exists(path)) {
         LoadCollision(path);
@@ -135,9 +132,7 @@ void SeamCalculatorWidget::SaveSettings() const {
     settings.setValue(QStringLiteral("global_context"), context_edit->text());
     settings.setValue(QStringLiteral("actor_address"), address_edit->text());
     settings.setValue(QStringLiteral("radius"), radius_spin->value());
-    settings.setValue(QStringLiteral("aim_gain2"), aim_spin->value());
     settings.setValue(QStringLiteral("stick_magnitude2"), stick_magnitude_spin->value());
-    settings.setValue(QStringLiteral("plan_speed2"), plan_speed_spin->value());
     settings.setValue(QStringLiteral("collision_file"), collision_path);
 }
 
@@ -312,37 +307,21 @@ QWidget* SeamCalculatorWidget::CreateClimbGroup() {
         way_labels[i] = new QLabel(group);
         way_labels[i]->setWordWrap(true);
         way_labels[i]->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        form->addRow(tr("Way %1").arg(i + 1), way_labels[i]);
     }
+    way_labels[0]->setToolTip(tr("The straight line from Link's position that gains the most "
+                                 "height before leaving the seam's vertex circles"));
+    form->addRow(tr("Best line"), way_labels[0]);
+    form->addRow(tr("Stick up"), way_labels[1]);
     layout->addLayout(form);
 
     auto* settings_row = new QHBoxLayout;
-    settings_row->addWidget(new QLabel(tr("Aim"), group));
-    aim_spin = new QDoubleSpinBox(group);
-    aim_spin->setRange(0.1, 49.9);
-    aim_spin->setDecimals(1);
-    aim_spin->setSuffix(tr(" /frame"));
-    aim_spin->setToolTip(tr("Height to gain per frame. Under 50, with some margin for speed "
-                            "changes and the stick's precision."));
-    connect(aim_spin, &QDoubleSpinBox::valueChanged, this, [this] { Update(); });
-    settings_row->addWidget(aim_spin);
-    settings_row->addWidget(new QLabel(tr("Stick"), group));
+    settings_row->addWidget(new QLabel(tr("Stick magnitude for suggestions"), group));
     stick_magnitude_spin = new QSpinBox(group);
     stick_magnitude_spin->setRange(1, 156);
     stick_magnitude_spin->setToolTip(tr("Circle pad distance from the center (as in the TAS Input "
                                         "window) for the suggested positions"));
     connect(stick_magnitude_spin, &QSpinBox::valueChanged, this, [this] { Update(); });
     settings_row->addWidget(stick_magnitude_spin);
-    settings_row->addWidget(new QLabel(tr("Speed if still"), group));
-    plan_speed_spin = new QDoubleSpinBox(group);
-    plan_speed_spin->setRange(0.01, 20.0);
-    plan_speed_spin->setDecimals(2);
-    plan_speed_spin->setSingleStep(0.05);
-    plan_speed_spin->setToolTip(tr("Speed to plan for while Link isn't moving. While he moves, "
-                                   "his actual speed is used (on a seam it's much lower than on "
-                                   "flat ground)."));
-    connect(plan_speed_spin, &QDoubleSpinBox::valueChanged, this, [this] { Update(); });
-    settings_row->addWidget(plan_speed_spin);
     settings_row->addStretch();
     layout->addLayout(settings_row);
     return group;
@@ -599,54 +578,74 @@ void SeamCalculatorWidget::UpdateClimb(const SeamMath::Triangle& tri, const Link
         }
     }
 
-    // The two directions that climb: close to the seam's level line, one each way, tilted slightly
-    // uphill. The angle from the uphill direction is acos(gain / (speed * rise)). Link's actual
-    // speed matters a lot: on a seam it's much lower than on flat ground.
-    const double speed = link.speed > 0.01f ? link.speed : plan_speed_spin->value();
-    const u16 aim_offset =
-        RadiansToYaw(std::acos(std::min(1.0, aim_spin->value() / (speed * rise))));
-    const u16 limit_offset = static_cast<u16>(
-        RadiansToYaw(std::acos(std::min(1.0, FloorCheckHeight / (speed * rise)))) + 1);
-    const double link_gain = gain_along(speed, link.yaw);
-
-    for (std::size_t i = 0; i < way_labels.size(); ++i) {
-        const int side = i == 0 ? 1 : -1;
-        const u16 aim_yaw = static_cast<u16>(uphill_yaw + side * aim_offset);
-        const u16 limit_yaw = static_cast<u16>(uphill_yaw + side * limit_offset);
-        const u16 level_yaw = static_cast<u16>(uphill_yaw + side * 0x4000);
-
-        // Frames until leaving the vertex circles, going this way
-        int frames = 0;
-        double x = link.x;
-        double z = link.z;
-        const double step_x = speed * std::sin(YawToRadians(aim_yaw));
-        const double step_z = speed * std::cos(YawToRadians(aim_yaw));
-        while (frames < 100000 &&
-               tri.ContainsXZ(static_cast<float>(x + step_x), static_cast<float>(z + step_z))) {
-            x += step_x;
-            z += step_z;
-            ++frames;
-        }
-
-        QString text = QStringLiteral("<b>%1</b>").arg(hex(aim_yaw));
-        if (const auto stick = StickFor(aim_yaw, link)) {
-            text += tr(", circle pad <b>X %1, Y %2</b>").arg((*stick)[0]).arg((*stick)[1]);
-        }
-        text += QStringLiteral("<br>") +
-                tr("+%1 per frame at speed %2, %3 frames of room; window %4 to %5")
-                    .arg(gain_along(speed, aim_yaw), 0, 'f', 1)
-                    .arg(speed, 0, 'f', 3)
-                    .arg(frames)
-                    .arg(hex(side > 0 ? limit_yaw : level_yaw))
-                    .arg(hex(side > 0 ? level_yaw : limit_yaw))
-                    .toHtmlEscaped();
-        // Whether Link's direction is in this window (climbing, under 50 per frame)
-        if ((YawDifference(link.yaw, uphill_yaw) > 0) == (side > 0) && link_gain > 0.0 &&
-            link_gain < FloorCheckHeight) {
-            text += QStringLiteral(" ") + Colored(tr("✓ Link's direction"), "#20a020");
-        }
-        way_labels[i]->setText(text);
+    // The straight line that gains the most height: how far Link can walk before leaving the
+    // vertex circles, times how much the seam rises per unit in that direction. How fast to walk
+    // it is up to the stick's magnitude: under 50 per frame, or Link falls off.
+    // At Link's speed, only directions gaining under 50 per frame (with a margin, as his speed
+    // changes a little from frame to frame) keep him on the seam
+    constexpr double SpeedMargin = 0.9;
+    const bool moving = link.speed > 0.0001f;
+    const double max_rise = moving ? SpeedMargin * FloorCheckHeight / link.speed
+                                   : std::numeric_limits<double>::infinity();
+    const auto best = BestClimbLine(tri, link.x, link.z, max_rise);
+    if (!best) {
+        way_labels[0]->setText(moving ? tr("No straight line climbs from here at Link's speed.")
+                                      : tr("No straight line climbs from here."));
+        way_labels[1]->clear();
+        return;
     }
+    const double rise_along = best->gain / best->length; // Height per unit walked along it
+    const double max_speed = FloorCheckHeight / rise_along;
+    QString text = tr("<b>%1</b>: +%2 over %3 units")
+                       .arg(hex(best->yaw))
+                       .arg(best->gain, 0, 'f', 0)
+                       .arg(best->length, 0, 'f', 4);
+    text += QStringLiteral("<br>") +
+            (moving ? tr("best at Link's speed; speed must stay under %1 for it")
+                    : tr("needs speed under %1 (Link isn't moving, so his speed isn't taken into "
+                         "account)"))
+                .arg(max_speed, 0, 'f', 4)
+                .toHtmlEscaped();
+    if (moving) {
+        const double per_frame = link.speed * rise_along;
+        text += QStringLiteral("<br>") +
+                (per_frame < FloorCheckHeight
+                     ? Colored(tr("At Link's speed %1: +%2 per frame for %3 frames ✓")
+                                   .arg(link.speed, 0, 'f', 4)
+                                   .arg(per_frame, 0, 'f', 1)
+                                   .arg(std::floor(best->length / link.speed), 0, 'f', 0),
+                               "#20a020")
+                     : Colored(tr("At Link's speed %1: +%2 per frame, too fast")
+                                   .arg(link.speed, 0, 'f', 4)
+                                   .arg(per_frame, 0, 'f', 1),
+                               "#c03030"));
+    }
+    way_labels[0]->setText(text);
+
+    // With the stick straight up, Link goes along the camera's input yaw
+    QString stick_text;
+    if (link.camera_yaw) {
+        const int off = YawDifference(best->yaw, *link.camera_yaw);
+        stick_text = tr("walks along the camera, %1: ").arg(hex(*link.camera_yaw));
+        stick_text += off == 0 ? Colored(tr("on the best line ✓"), "#20a020")
+                               : tr("the best line is %1%2 from it")
+                                     .arg(off > 0 ? QStringLiteral("+") : QStringLiteral("-"))
+                                     .arg(hex(static_cast<u16>(std::abs(off))))
+                                     .toHtmlEscaped();
+    } else {
+        stick_text = tr("Find the GlobalContext to compare with the camera.").toHtmlEscaped();
+    }
+    // What Link's current direction gives, for comparison
+    const double angle = YawToRadians(link.yaw);
+    const double length = StraightLineLength(tri, link.x, link.z, std::sin(angle), std::cos(angle));
+    stick_text += QStringLiteral("<br>") +
+                  tr("Link's direction %1: %2%3 over %4 units")
+                      .arg(hex(link.yaw))
+                      .arg(gain_along(length, link.yaw) >= 0 ? QStringLiteral("+") : QString{})
+                      .arg(gain_along(length, link.yaw), 0, 'f', 0)
+                      .arg(length, 0, 'f', 4)
+                      .toHtmlEscaped();
+    way_labels[1]->setText(stick_text);
 }
 
 void SeamCalculatorWidget::OnEmulationStarting(EmuThread*) {
