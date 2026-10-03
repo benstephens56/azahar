@@ -267,6 +267,122 @@ inline std::optional<std::array<float, 2>> ClosestPointInHeightRange(const Trian
     return best;
 }
 
+/// Where Link can step onto a seam from a floor: the seam is at the floor's height there
+struct MountSpot {
+    std::array<float, 2> point; ///< X, Z
+    float floor_height;         ///< Height of the floor (and the seam) there
+    int floor_index;            ///< Index of the floor triangle
+    int vertex;                 ///< Seam vertex whose circle the spot is in
+};
+
+/**
+ * Finds the spots where the seam's plane meets the plane of a floor Link can stand on, within the
+ * seam's vertex circles and on the floor (with the floor check's leniency), where that floor is
+ * the highest one Link would stand on. Each spot is the middle of such a stretch, so it only
+ * depends on the collision. Returns the spot closest to (x, z).
+ */
+inline std::optional<MountSpot> FindMountSpot(const Triangle& seam,
+                                              std::span<const Triangle> collision, float x,
+                                              float z) {
+    if (!seam.IsSeam()) {
+        return std::nullopt;
+    }
+    const double s_nx = seam.Nx() / seam.Ny();
+    const double s_nz = seam.Nz() / seam.Ny();
+    const double s_d = seam.dist / seam.Ny();
+    const double radius = CheckDist * 0.999;
+
+    std::optional<MountSpot> best;
+    double best_distance = 0.0;
+    for (int vertex = 0; vertex < 3; ++vertex) {
+        const double cx = seam.vertices[vertex][0];
+        const double cz = seam.vertices[vertex][2];
+        // Floors near this vertex's circle
+        std::vector<const Triangle*> floors;
+        for (const auto& tri : collision) {
+            if (tri.Ny() <= 0.5f || &tri == &seam) {
+                continue;
+            }
+            const auto [min_x, max_x] =
+                std::minmax({tri.vertices[0][0], tri.vertices[1][0], tri.vertices[2][0]});
+            const auto [min_z, max_z] =
+                std::minmax({tri.vertices[0][2], tri.vertices[1][2], tri.vertices[2][2]});
+            if (cx + 2.0 < min_x || cx - 2.0 > max_x || cz + 2.0 < min_z || cz - 2.0 > max_z) {
+                continue;
+            }
+            floors.push_back(&tri);
+        }
+        for (const Triangle* floor : floors) {
+            // Seam height = floor height along the line a * x + b * z = c
+            const double a = -s_nx + floor->Nx() / floor->Ny();
+            const double b = -s_nz + floor->Nz() / floor->Ny();
+            const double c = s_d - floor->dist / floor->Ny();
+            const double length = std::hypot(a, b);
+            if (length == 0.0) {
+                continue;
+            }
+            const double offset = (a * cx + b * cz - c) / length;
+            if (std::fabs(offset) >= radius) {
+                continue;
+            }
+            // Chord of the line inside the circle, sampled for the part on this floor (and where
+            // it's the floor Link would be on: no other floor up to 50 above it)
+            const double foot_x = cx - a / length * offset;
+            const double foot_z = cz - b / length * offset;
+            const double dir_x = -b / length;
+            const double dir_z = a / length;
+            const double half = std::sqrt(radius * radius - offset * offset);
+            constexpr int Samples = 64;
+            int run_start = -1;
+            int best_start = -1;
+            int best_end = -1;
+            for (int i = 0; i <= Samples + 1; ++i) {
+                bool ok = false;
+                if (i <= Samples) {
+                    const double t = -half + 2.0 * half * i / Samples;
+                    const float px = static_cast<float>(foot_x + dir_x * t);
+                    const float pz = static_cast<float>(foot_z + dir_z * t);
+                    ok = floor->ContainsXZ(px, pz);
+                    if (ok) {
+                        const float height = floor->HeightAt(px, pz);
+                        for (const Triangle* other : floors) {
+                            if (other != floor && other->ContainsXZ(px, pz)) {
+                                const float other_height = other->HeightAt(px, pz);
+                                if (other_height > height + 0.01f &&
+                                    other_height < height + FloorCheckHeight) {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (ok && run_start < 0) {
+                    run_start = i;
+                } else if (!ok && run_start >= 0) {
+                    if (i - 1 - run_start > best_end - best_start) {
+                        best_start = run_start;
+                        best_end = i - 1;
+                    }
+                    run_start = -1;
+                }
+            }
+            if (best_start < 0) {
+                continue;
+            }
+            const double t = -half + 2.0 * half * ((best_start + best_end) / 2.0) / Samples;
+            const float px = static_cast<float>(foot_x + dir_x * t);
+            const float pz = static_cast<float>(foot_z + dir_z * t);
+            const double distance = std::hypot(px - x, pz - z);
+            if (!best || distance < best_distance) {
+                best = MountSpot{{px, pz}, floor->HeightAt(px, pz), floor->index, vertex};
+                best_distance = distance;
+            }
+        }
+    }
+    return best;
+}
+
 /**
  * Reads the scene collision triangles of an OoT3D scene file (e.g. spot00_info.zsi, as extracted
  * from the game or included with exodus122's 3d_model_viewer). Intangible triangles are skipped.

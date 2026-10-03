@@ -465,13 +465,25 @@ void SeamCalculatorWidget::UpdateMount(const SeamMath::Triangle& tri, const Link
         mount_status_label->setText(tr("Link is outside the seam").toHtmlEscaped());
     }
 
-    // The closest spot where the seam is right at Link's feet: in practice Link only reliably gets
-    // onto a seam there, not anywhere he'd be moved up onto it. Aim a little above his Y, as moving
-    // by the smallest step can change a steep seam's height by almost a unit.
-    const float gap_steps = static_cast<float>(tri.RisePerUnit()) * 0.000244f;
-    const float aim_height = link.y + std::min(0.45f, gap_steps / 2.0f);
-    target = on_seam ? std::nullopt
-                     : ClosestPointInHeightRange(tri, link.x, link.z, aim_height, aim_height);
+    // Where the seam is right at the height of the floor Link stands on (Link only reliably gets
+    // onto a seam there, not anywhere he'd be moved up onto it). With the collision loaded, that's
+    // where the seam's plane meets the floor's plane: a fixed spot that doesn't depend on where
+    // Link is. Without it, the closest spot where the seam is at Link's current height.
+    const SeamMath::Triangle* floor = nullptr;
+    target.reset();
+    if (!on_seam) {
+        if (const auto spot = FindMountSpot(tri, collision, link.x, link.z)) {
+            target = spot->point;
+            const auto it =
+                std::find_if(collision.begin(), collision.end(),
+                             [&](const auto& other) { return other.index == spot->floor_index; });
+            floor = it != collision.end() ? &*it : nullptr;
+        } else {
+            target = ClosestPointInHeightRange(tri, link.x, link.z, link.y, link.y);
+        }
+    }
+    // Height Link would be at, standing at (x, z)
+    const auto feet_at = [&](float x, float z) { return floor ? floor->HeightAt(x, z) : link.y; };
     if (target) {
         // Positions are floats: near the target, each step of X or Z can change a steep seam's
         // height by almost a unit. Pick the nearby position (as stored) where the seam is closest
@@ -480,6 +492,7 @@ void SeamCalculatorWidget::UpdateMount(const SeamMath::Triangle& tri, const Link
         const float tz = (*target)[1];
         std::optional<std::array<float, 2>> best;
         float best_gap = 0.0f;
+        float best_distance = 0.0f;
         float x = tx;
         for (int i = 0; i < 6; ++i) {
             x = std::nextafter(x, -std::numeric_limits<float>::infinity());
@@ -492,10 +505,16 @@ void SeamCalculatorWidget::UpdateMount(const SeamMath::Triangle& tri, const Link
             }
             for (int j = 0; j < 13;
                  ++j, z = std::nextafter(z, std::numeric_limits<float>::infinity())) {
-                const float gap = tri.HeightAt(x, z) - link.y;
-                if (gap >= 0.0f && tri.ContainsXZ(x, z) && (!best || gap < best_gap)) {
+                const float gap = tri.HeightAt(x, z) - feet_at(x, z);
+                const float distance = std::hypot(x - tx, z - tz);
+                if (gap < 0.0f || !tri.ContainsXZ(x, z)) {
+                    continue;
+                }
+                if (!best || gap < best_gap - 0.01f ||
+                    (gap < best_gap + 0.01f && distance < best_distance)) {
                     best = std::array<float, 2>{x, z};
                     best_gap = gap;
+                    best_distance = distance;
                 }
             }
         }
@@ -504,18 +523,30 @@ void SeamCalculatorWidget::UpdateMount(const SeamMath::Triangle& tri, const Link
     move_button->setEnabled(target.has_value());
     if (!target) {
         target_label->setText(on_seam ? QString{}
-                                      : tr("The seam doesn't reach Link's height near any of its "
-                                           "vertices."));
+                                      : tr("The seam doesn't reach the floor's height near any of "
+                                           "its vertices."));
         walk_label->clear();
         return;
     }
-    const float dx = (*target)[0] - link.x;
-    const float dz = (*target)[1] - link.z;
-    target_label->setText(tr("X %1  Z %2, %3 units away (seam %4 above Link's feet there)")
-                              .arg((*target)[0], 0, 'f', 5)
-                              .arg((*target)[1], 0, 'f', 5)
-                              .arg(std::hypot(dx, dz), 0, 'f', 5)
-                              .arg(tri.HeightAt((*target)[0], (*target)[1]) - link.y, 0, 'f', 2));
+    const float tx = (*target)[0];
+    const float tz = (*target)[1];
+    const float dx = tx - link.x;
+    const float dz = tz - link.z;
+    QString target_text = tr("X %1  Z %2").arg(tx, 0, 'f', 5).arg(tz, 0, 'f', 5);
+    if (floor) {
+        target_text += tr(" on floor poly %1 (height %2), seam %3 above it")
+                           .arg(floor->index)
+                           .arg(feet_at(tx, tz), 0, 'f', 2)
+                           .arg(tri.HeightAt(tx, tz) - feet_at(tx, tz), 0, 'f', 2);
+    } else {
+        target_text +=
+            tr(", seam %1 above Link's feet").arg(tri.HeightAt(tx, tz) - link.y, 0, 'f', 2);
+    }
+    target_text += QStringLiteral("\n") + tr("Move X %1, Z %2 (%3 units)")
+                                              .arg(dx, 0, 'f', 5)
+                                              .arg(dz, 0, 'f', 5)
+                                              .arg(std::hypot(dx, dz), 0, 'f', 5);
+    target_label->setText(target_text);
     const u16 walk_yaw = YawOf(dx, dz);
     QString walk = tr("direction %1").arg(hex(walk_yaw));
     if (const auto stick = StickFor(walk_yaw, link)) {
