@@ -13,6 +13,7 @@
 #include "common/common_types.h"
 
 class EmuThread;
+class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -47,12 +48,14 @@ protected:
 private:
     struct LinkState {
         float x, y, z;
-        float prev_y;
+        float prev_x, prev_y, prev_z; ///< Position before his last frame's movement
         float floor_height;
         u16 bg_check_flags;
         u16 yaw;                       ///< Direction Link moves in (world.rot.y)
         float speed;                   ///< speedXZ
         std::optional<u16> camera_yaw; ///< Input yaw of the active camera, if known
+        /// Index of the scene collision triangle Link's floor check found, if known
+        std::optional<int> floor_poly;
     };
 
     QWidget* CreateSetupGroup();
@@ -78,9 +81,13 @@ private:
     void UpdateMount(const SeamMath::Triangle& tri, const LinkState& link);
     void UpdateClimb(const SeamMath::Triangle& tri, const LinkState& link);
     void ClearLive();
+    /// Shows which triangle Link stands on and how he actually moved last frame
+    void UpdateCheck(const LinkState& link);
     /// Circle pad position (in TAS Input units) that makes Link go along `yaw`, if the camera is
     /// known. Returns {x, y, resulting yaw}.
     std::optional<std::array<int, 3>> StickFor(u16 yaw, const LinkState& link) const;
+    /// Most the seam may rise per unit walked at the climbing speed, for Link to stay on it
+    double ClimbMaxRise() const;
     void MoveLinkToTarget();
     void UpdateTimerState();
     void SaveSettings() const;
@@ -112,6 +119,11 @@ private:
 
     // Climbing
     QLabel* next_frame_label;
+    QLabel* check_label;
+    QPushButton* use_floor_button;
+    QDoubleSpinBox* climb_speed_spin;
+    /// Distance Link moves per frame per unit of speed, as last measured
+    double step_ratio = 1.0;
     std::array<QLabel*, 2> way_labels{};
     QSpinBox* stick_magnitude_spin;
 

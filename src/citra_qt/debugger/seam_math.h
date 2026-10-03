@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <numbers>
 #include <optional>
 #include <span>
 #include <vector>
@@ -270,12 +271,12 @@ inline std::optional<std::array<float, 2>> ClosestPointInHeightRange(const Trian
 
 /**
  * How far a straight line from (x, z) along the (unit) direction stays where the floor check
- * accepts the seam: inside the union of its vertex circles.
+ * accepts the seam: inside the triangle or the union of its vertex circles.
  */
 inline double StraightLineLength(const Triangle& tri, double x, double z, double dir_x,
                                  double dir_z) {
     const double radius = CheckDist * 0.999;
-    std::array<std::array<double, 2>, 3> intervals{};
+    std::array<std::array<double, 2>, 4> intervals{};
     std::size_t count = 0;
     for (const auto& v : tri.vertices) {
         // |P + t D - C|^2 = r^2
@@ -294,6 +295,40 @@ inline double StraightLineLength(const Triangle& tri, double x, double z, double
         }
         intervals[count++] = {-b - root, t_out};
     }
+
+    // The triangle itself: the part of the line on the inner side of all three edges (kept a
+    // little inside them, against rounding)
+    constexpr double Margin = 0.001;
+    const auto vx = [&](std::size_t i) { return static_cast<double>(tri.vertices[i][0]); };
+    const auto vz = [&](std::size_t i) { return static_cast<double>(tri.vertices[i][2]); };
+    const double area = (vx(1) - vx(0)) * (vz(2) - vz(0)) - (vz(1) - vz(0)) * (vx(2) - vx(0));
+    if (area != 0.0) {
+        const double orientation = area > 0.0 ? 1.0 : -1.0;
+        double lo = -std::numeric_limits<double>::infinity();
+        double hi = std::numeric_limits<double>::infinity();
+        for (std::size_t i = 0; i < 3 && lo <= hi; ++i) {
+            const std::size_t j = (i + 1) % 3;
+            const double ex = vx(j) - vx(i);
+            const double ez = vz(j) - vz(i);
+            const double length = std::hypot(ex, ez);
+            // Signed distance from the edge, inside positive: f0 + t * f1
+            const double f0 = orientation * (ex * (z - vz(i)) - ez * (x - vx(i))) / length - Margin;
+            const double f1 = orientation * (ex * dir_z - ez * dir_x) / length;
+            if (f1 == 0.0) {
+                if (f0 < 0.0) {
+                    hi = -std::numeric_limits<double>::infinity();
+                }
+            } else if (f1 > 0.0) {
+                lo = std::max(lo, -f0 / f1);
+            } else {
+                hi = std::min(hi, -f0 / f1);
+            }
+        }
+        if (lo <= hi && hi > 0.0) {
+            intervals[count++] = {lo, hi};
+        }
+    }
+
     std::sort(intervals.begin(), intervals.begin() + count);
     double reach = 0.0;
     bool started = false;
@@ -332,24 +367,18 @@ inline std::optional<ClimbLine> BestClimbLine(
         const double dx = std::sin(angle);
         const double dz = std::cos(angle);
         const double rise_along = rise * (dx * ux + dz * uz);
-        if (rise_along > max_rise) {
+        if (rise_along <= 0.0 || rise_along > max_rise) {
             return ClimbLine{yaw, 0.0, -1.0};
         }
         const double length = StraightLineLength(tri, x, z, dx, dz);
         return ClimbLine{yaw, length, rise_along * length};
     };
-    // Coarse search over all directions, then refine around the best one
+    // Every direction: the ones that climb without gaining too much per frame can be a narrow
+    // range right next to the seam's level direction
     std::optional<ClimbLine> best;
-    for (int yaw = 0; yaw < 0x10000; yaw += 16) {
+    for (int yaw = 0; yaw < 0x10000; ++yaw) {
         const auto candidate = line(static_cast<u16>(yaw));
         if (!best || candidate.gain > best->gain) {
-            best = candidate;
-        }
-    }
-    const int center = best->yaw;
-    for (int offset = -24; offset <= 24; ++offset) {
-        const auto candidate = line(static_cast<u16>(center + offset));
-        if (candidate.gain > best->gain) {
             best = candidate;
         }
     }
@@ -470,6 +499,192 @@ inline std::optional<MountSpot> FindMountSpot(const Triangle& seam,
                 best = MountSpot{{px, pz}, floor->HeightAt(px, pz), floor->index, vertex};
                 best_distance = distance;
             }
+        }
+    }
+    return best;
+}
+
+/// A spot to get onto a seam from, and the straight line to climb from there
+struct MountClimb {
+    MountSpot spot;
+    ClimbLine line;
+};
+
+/**
+ * The best straight line from (x, z) among the directions where the seam rises at most
+ * `max_rise` per unit, searching coarsely through that range of directions and then around the
+ * best one. Faster than BestClimbLine, for searching many starting points.
+ */
+inline std::optional<ClimbLine> QuickClimbLine(const Triangle& tri, double x, double z,
+                                               double max_rise, int coarse_steps = 96) {
+    const double rise = tri.RisePerUnit();
+    if (!std::isfinite(rise) || rise <= 0.0) {
+        return std::nullopt;
+    }
+    const auto [ux, uz] = tri.UphillDirection();
+    const u16 uphill = YawOf(ux, uz);
+    // Directions climbing at most max_rise: at least this far from straight uphill
+    const int min_off =
+        std::min<int>(0x3FFF, static_cast<int>(std::ceil(std::acos(std::min(1.0, max_rise / rise)) /
+                                                         (2.0 * std::numbers::pi) * 0x10000)));
+    const auto line = [&](int offset) {
+        const u16 yaw = static_cast<u16>(uphill + offset);
+        const double angle = YawToRadians(yaw);
+        const double dx = std::sin(angle);
+        const double dz = std::cos(angle);
+        const double rise_along = rise * (dx * ux + dz * uz);
+        if (rise_along <= 0.0 || rise_along > max_rise) {
+            return ClimbLine{yaw, 0.0, -1.0};
+        }
+        const double length = StraightLineLength(tri, x, z, dx, dz);
+        return ClimbLine{yaw, length, rise_along * length};
+    };
+    std::optional<ClimbLine> best;
+    int best_offset = 0;
+    const int window = 0x4000 - min_off;
+    const int step = std::max(1, window / coarse_steps);
+    for (const int side : {1, -1}) {
+        for (int off = min_off; off < 0x4000; off += step) {
+            const auto candidate = line(side * off);
+            if (!best || candidate.gain > best->gain) {
+                best = candidate;
+                best_offset = side * off;
+            }
+        }
+    }
+    for (int off = best_offset - step; off <= best_offset + step; ++off) {
+        const auto candidate = line(off);
+        if (candidate.gain > best->gain) {
+            best = candidate;
+        }
+    }
+    if (!best || best->gain <= 0.0) {
+        return std::nullopt;
+    }
+    return best;
+}
+
+/**
+ * Searches the spots where Link can get onto the seam from a floor (where the seam's plane meets
+ * the floor's plane, on the seam and on that floor, with no other floor up to 50 above), for the
+ * one with the straight line that climbs the most, among the directions where the seam rises at
+ * most `max_rise` per unit.
+ */
+inline std::optional<MountClimb> BestMountClimb(const Triangle& seam,
+                                                std::span<const Triangle> collision,
+                                                double max_rise) {
+    if (!seam.IsSeam()) {
+        return std::nullopt;
+    }
+    const double s_nx = seam.Nx() / seam.Ny();
+    const double s_nz = seam.Nz() / seam.Ny();
+    const double s_d = seam.dist / seam.Ny();
+    const auto [seam_min_x, seam_max_x] =
+        std::minmax({seam.vertices[0][0], seam.vertices[1][0], seam.vertices[2][0]});
+    const auto [seam_min_z, seam_max_z] =
+        std::minmax({seam.vertices[0][2], seam.vertices[1][2], seam.vertices[2][2]});
+    const double min_x = seam_min_x - 1.0;
+    const double max_x = seam_max_x + 1.0;
+    const double min_z = seam_min_z - 1.0;
+    const double max_z = seam_max_z + 1.0;
+
+    std::vector<const Triangle*> floors;
+    for (const auto& tri : collision) {
+        if (tri.Ny() <= 0.5f || &tri == &seam) {
+            continue;
+        }
+        const auto [f_min_x, f_max_x] =
+            std::minmax({tri.vertices[0][0], tri.vertices[1][0], tri.vertices[2][0]});
+        const auto [f_min_z, f_max_z] =
+            std::minmax({tri.vertices[0][2], tri.vertices[1][2], tri.vertices[2][2]});
+        if (max_x + 1.0 < f_min_x || min_x - 1.0 > f_max_x || max_z + 1.0 < f_min_z ||
+            min_z - 1.0 > f_max_z) {
+            continue;
+        }
+        floors.push_back(&tri);
+    }
+    const auto mountable = [&](const Triangle* floor, float px, float pz) {
+        if (!seam.ContainsXZ(px, pz) || !floor->ContainsXZ(px, pz)) {
+            return false;
+        }
+        const float height = floor->HeightAt(px, pz);
+        for (const Triangle* other : floors) {
+            if (other != floor && other->ContainsXZ(px, pz)) {
+                const float other_height = other->HeightAt(px, pz);
+                if (other_height > height + 0.01f && other_height < height + FloorCheckHeight) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    std::optional<MountClimb> best;
+    const auto consider = [&](const Triangle* floor, double px, double pz, int coarse_steps) {
+        const float fx = static_cast<float>(px);
+        const float fz = static_cast<float>(pz);
+        if (!mountable(floor, fx, fz)) {
+            return false;
+        }
+        const auto line = QuickClimbLine(seam, fx, fz, max_rise, coarse_steps);
+        if (line && (!best || line->gain > best->line.gain)) {
+            best = MountClimb{{{fx, fz}, floor->HeightAt(fx, fz), floor->index, -1}, *line};
+            return true;
+        }
+        return false;
+    };
+    for (const Triangle* floor : floors) {
+        // Seam height = floor height along the line a * x + b * z = c
+        const double a = -s_nx + floor->Nx() / floor->Ny();
+        const double b = -s_nz + floor->Nz() / floor->Ny();
+        const double c = s_d - floor->dist / floor->Ny();
+        const double length = std::hypot(a, b);
+        if (length == 0.0) {
+            continue;
+        }
+        // Clip the line to the seam's bounding box: point (foot) and direction
+        const double foot_x = a / length * (c / length);
+        const double foot_z = b / length * (c / length);
+        const double dir_x = -b / length;
+        const double dir_z = a / length;
+        double lo = -std::numeric_limits<double>::infinity();
+        double hi = std::numeric_limits<double>::infinity();
+        const auto clip = [&](double p, double d, double min, double max) {
+            if (d == 0.0) {
+                if (p < min || p > max) {
+                    hi = -std::numeric_limits<double>::infinity();
+                }
+                return;
+            }
+            const double t0 = (min - p) / d;
+            const double t1 = (max - p) / d;
+            lo = std::max(lo, std::min(t0, t1));
+            hi = std::min(hi, std::max(t0, t1));
+        };
+        clip(foot_x, dir_x, min_x, max_x);
+        clip(foot_z, dir_z, min_z, max_z);
+        if (lo > hi) {
+            continue;
+        }
+        // Coarsely along the line, then finely around the best spot found on it
+        constexpr double Step = 0.5;
+        std::optional<double> best_t;
+        for (double t = lo; t <= hi; t += Step) {
+            if (consider(floor, foot_x + dir_x * t, foot_z + dir_z * t, 24)) {
+                best_t = t;
+            }
+        }
+        if (best_t) {
+            for (double t = *best_t - Step; t <= *best_t + Step; t += Step / 16) {
+                consider(floor, foot_x + dir_x * t, foot_z + dir_z * t, 96);
+            }
+        }
+    }
+    if (best) {
+        // The best direction from there, exactly
+        if (const auto exact =
+                BestClimbLine(seam, best->spot.point[0], best->spot.point[1], max_rise)) {
+            best->line = *exact;
         }
     }
     return best;
