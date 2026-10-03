@@ -763,28 +763,29 @@ void SeamCalculatorWidget::Update() {
             .arg(in_band ? QStringLiteral(" — ") + Colored(tr("Link is in it ✓"), "#20a020")
                          : QString{}));
 
-    const auto nearest =
-        SeamMath::ClosestPointInHeightRange(tri, link->x, link->z, band_min, band_max);
-    if (!nearest) {
-        target_label->setText(tr("The seam doesn't reach these heights near any of its vertices."));
-        return;
-    }
-    const float dx = (*nearest)[0] - link->x;
-    const float dz = (*nearest)[1] - link->z;
-    target_label->setText(in_band ? tr("Link is already in the band.")
-                                  : tr("X %1   Z %2   (move X %3, Z %4: %5 units)")
-                                        .arg((*nearest)[0], 0, 'f', 5)
-                                        .arg((*nearest)[1], 0, 'f', 5)
-                                        .arg(dx, 0, 'f', 5)
-                                        .arg(dz, 0, 'f', 5)
-                                        .arg(std::hypot(dx, dz), 0, 'f', 5));
-
-    // Move a little inside the band's edges, so that rounding can't leave Link outside of it
-    constexpr float EdgeMargin = 5.0f;
-    const float margin = std::min(EdgeMargin, (band_max - band_min) / 4.0f);
+    // Aim for the middle half of the band: at its edges, rounding of the position (almost one unit
+    // of height per step here) can leave Link just outside of it
+    const float margin = (band_max - band_min) / 4.0f;
     target = SeamMath::ClosestPointInHeightRange(tri, link->x, link->z, band_min + margin,
                                                  band_max - margin);
     move_button->setEnabled(target.has_value());
+    if (in_band) {
+        target_label->setText(tr("Link is in the band."));
+    } else if (!target) {
+        target_label->setText(tr("The seam doesn't reach these heights near any of its vertices."));
+    } else {
+        const float dx = (*target)[0] - link->x;
+        const float dz = (*target)[1] - link->z;
+        target_label->setText(
+            tr("X %1   Z %2   (move X %3, Z %4: %5 units; seam height there %6). Walking can't "
+               "make such a small move directly: use Way 1 or 2 below.")
+                .arg((*target)[0], 0, 'f', 5)
+                .arg((*target)[1], 0, 'f', 5)
+                .arg(dx, 0, 'f', 5)
+                .arg(dz, 0, 'f', 5)
+                .arg(std::hypot(dx, dz), 0, 'f', 5)
+                .arg(tri.HeightAt((*target)[0], (*target)[1]), 0, 'f', 2));
+    }
 }
 
 void SeamCalculatorWidget::ClearClimb() {
@@ -807,6 +808,15 @@ void SeamCalculatorWidget::UpdateClimb(const SeamMath::Triangle& tri, const Link
         return QStringLiteral("0x%1").arg(value, 4, 16, QLatin1Char('0'));
     };
 
+    // Link is either on the seam (climbing it), or still on other ground (getting onto it). The
+    // band of seam heights Link is put on is from his feet up to his previous Y + 50.
+    const float band_min = link.y;
+    const float band_max = link.prev_y + FloorCheckHeight;
+    const float band_middle = (band_min + band_max) / 2.0f;
+    const float here = tri.HeightAt(link.x, link.z);
+    const bool on_seam = tri.ContainsXZ(link.x, link.z) && (link.bg_check_flags & BgCheckGround) &&
+                         std::fabs(here - link.y) < 0.5f;
+
     // Next frame, at Link's current speed and direction (the game moves Link by
     // speed * (sin, cos) of his direction)
     if (link.speed == 0.0f) {
@@ -815,63 +825,113 @@ void SeamCalculatorWidget::UpdateClimb(const SeamMath::Triangle& tri, const Link
         const double yaw = YawToRadians(link.yaw);
         const float next_x = link.x + static_cast<float>(link.speed * std::sin(yaw));
         const float next_z = link.z + static_cast<float>(link.speed * std::cos(yaw));
-        const float gain = tri.HeightAt(next_x, next_z) - link.y;
+        const float next = tri.HeightAt(next_x, next_z);
+        const float gain = next - link.y;
         if (!tri.ContainsXZ(next_x, next_z)) {
             next_frame_label->setText(
-                Colored(tr("leaves the seam's vertex circles: Link falls off"), "#c03030"));
-        } else if (gain >= FloorCheckHeight) {
+                on_seam ? Colored(tr("leaves the seam's vertex circles: Link falls off"), "#c03030")
+                        : tr("outside the seam's vertex circles"));
+        } else if (next >= band_max) {
             next_frame_label->setText(
-                Colored(tr("gains %1: too much (50 or more), Link falls off").arg(gain, 0, 'f', 2),
+                on_seam ? Colored(tr("gains %1: too much (50 or more), Link falls off")
+                                      .arg(gain, 0, 'f', 2),
+                                  "#c03030")
+                        : tr("seam %1 above the band (seam height %2)")
+                              .arg(next - band_max, 0, 'f', 2)
+                              .arg(next, 0, 'f', 2));
+        } else if (next >= band_min) {
+            next_frame_label->setText(
+                on_seam ? Colored(tr("gains %1 ✓").arg(gain, 0, 'f', 2), "#20a020")
+                        : Colored(tr("seam height %1 is in the band: Link gets onto the seam ✓")
+                                      .arg(next, 0, 'f', 2),
+                                  "#20a020"));
+        } else if (!on_seam && here >= band_max) {
+            next_frame_label->setText(
+                Colored(tr("skips over the band (seam height %1 to %2): move more slowly across it")
+                            .arg(here, 0, 'f', 1)
+                            .arg(next, 0, 'f', 1),
                         "#c03030"));
-        } else if (gain >= 0.0f) {
-            next_frame_label->setText(Colored(tr("gains %1 ✓").arg(gain, 0, 'f', 2), "#20a020"));
         } else {
-            next_frame_label->setText(tr("goes down %1").arg(-gain, 0, 'f', 2));
+            next_frame_label->setText(on_seam ? tr("goes down %1").arg(-gain, 0, 'f', 2)
+                                              : tr("seam %1 below Link's feet (seam height %2)")
+                                                    .arg(band_min - next, 0, 'f', 2)
+                                                    .arg(next, 0, 'f', 2));
         }
     }
 
-    // The two directions that climb: close to the seam's level line, tilted slightly uphill, one
-    // each way. The angle from the uphill direction is acos(gain / (speed * rise)).
+    // The two ways to go: close to the seam's level line, one each way, tilted slightly uphill to
+    // climb (or towards the band to get onto the seam), so that the seam height under Link changes
+    // by `change` per frame. The angle from the uphill direction is acos(change / (speed * rise)).
     const double speed = std::max<double>(link.speed, plan_speed_spin->value());
-    const double aim_ratio = std::min(1.0, aim_spin->value() / (speed * rise));
-    const double limit_ratio = std::min(1.0, FloorCheckHeight / (speed * rise));
-    const u16 aim_angle = RadiansToYaw(std::acos(aim_ratio));
-    const u16 limit_angle = RadiansToYaw(std::acos(limit_ratio));
+    const double change = on_seam || here < band_middle ? aim_spin->value() : -aim_spin->value();
+    // Most the seam height may change per frame: under 50 when climbing, and less than the band's
+    // height when getting onto it (or Link could skip over it)
+    const double max_change = on_seam ? FloorCheckHeight : band_max - band_min;
+    const u16 aim_offset_up =
+        RadiansToYaw(std::acos(std::min(1.0, std::fabs(change) / (speed * rise))));
+    const u16 limit_offset_up = RadiansToYaw(std::acos(std::min(1.0, max_change / (speed * rise))));
+    // Offsets from the uphill direction (0x4000 = along the level line)
+    const u16 aim_offset = change > 0 ? aim_offset_up : static_cast<u16>(0x8000 - aim_offset_up);
+    const u16 limit_offset = change > 0 ? static_cast<u16>(limit_offset_up + 1)
+                                        : static_cast<u16>(0x8000 - limit_offset_up - 1);
     const int magnitude = stick_magnitude_spin->value();
 
     for (std::size_t i = 0; i < direction_labels.size(); ++i) {
         const int side = i == 0 ? 1 : -1;
-        const u16 aim_yaw = static_cast<u16>(uphill_yaw + side * aim_angle);
-        // Directions from `limit_yaw` (gaining just under 50) to `level_yaw` (gaining nothing)
-        const u16 limit_yaw = static_cast<u16>(uphill_yaw + side * (limit_angle + 1));
+        const u16 aim_yaw = static_cast<u16>(uphill_yaw + side * aim_offset);
+        const u16 limit_yaw = static_cast<u16>(uphill_yaw + side * limit_offset);
         const u16 level_yaw = static_cast<u16>(uphill_yaw + side * 0x4000);
+        const u16 window_from = (side > 0) == (change > 0) ? limit_yaw : level_yaw;
+        const u16 window_to = (side > 0) == (change > 0) ? level_yaw : limit_yaw;
 
-        // Frames until leaving the vertex circles, going this way
+        // Frames until leaving the vertex circles (or, getting onto the seam, reaching the band)
         int frames = 0;
+        bool reaches_band = false;
         double x = link.x;
         double z = link.z;
         const double step_x = speed * std::sin(YawToRadians(aim_yaw));
         const double step_z = speed * std::cos(YawToRadians(aim_yaw));
-        while (frames < 100000 &&
-               tri.ContainsXZ(static_cast<float>(x + step_x), static_cast<float>(z + step_z))) {
+        while (frames < 100000) {
+            const float next_x = static_cast<float>(x + step_x);
+            const float next_z = static_cast<float>(z + step_z);
+            if (!tri.ContainsXZ(next_x, next_z)) {
+                break;
+            }
             x += step_x;
             z += step_z;
             ++frames;
+            const float height = tri.HeightAt(next_x, next_z);
+            if (!on_seam && height >= band_min && height < band_max) {
+                reaches_band = true;
+                break;
+            }
         }
-        const double gain = gain_along(speed, aim_yaw);
-        QString text =
-            tr("direction %1, %2 uphill of the level line (window %3 to %4); gains %5 "
-               "per frame; %6 frames of room (about %7 higher)")
-                .arg(hex(aim_yaw), hex(static_cast<u16>(0x4000 - aim_angle)),
-                     hex(side > 0 ? limit_yaw : level_yaw), hex(side > 0 ? level_yaw : limit_yaw))
-                .arg(gain, 0, 'f', 1)
-                .arg(frames)
-                .arg(gain * frames, 0, 'f', 0)
-                .toHtmlEscaped();
-        if (link.yaw == aim_yaw ||
-            (std::abs(YawDifference(link.yaw, uphill_yaw)) >= limit_angle + 1 &&
-             std::abs(YawDifference(link.yaw, uphill_yaw)) <= 0x4000 &&
-             (YawDifference(link.yaw, uphill_yaw) > 0) == (side > 0))) {
+        const double per_frame = gain_along(speed, aim_yaw);
+        const u16 tilt = static_cast<u16>(std::abs(0x4000 - static_cast<int>(aim_offset)));
+        QString text;
+        if (on_seam) {
+            text = tr("direction %1, %2 uphill of the level line (window %3 to %4); gains %5 "
+                      "per frame; %6 frames of room (about %7 higher)")
+                       .arg(hex(aim_yaw), hex(tilt), hex(window_from), hex(window_to))
+                       .arg(per_frame, 0, 'f', 1)
+                       .arg(frames)
+                       .arg(per_frame * frames, 0, 'f', 0)
+                       .toHtmlEscaped();
+        } else {
+            text = tr("direction %1, %2 towards the band from the level line (window %3 to %4); "
+                      "seam height changes %5 per frame; %6")
+                       .arg(hex(aim_yaw), hex(tilt), hex(window_from), hex(window_to))
+                       .arg(per_frame, 0, 'f', 1)
+                       .arg(reaches_band
+                                ? tr("reaches the band in %1 frames").arg(frames)
+                                : tr("leaves the vertex circles after %1 frames first").arg(frames))
+                       .toHtmlEscaped();
+        }
+        // Whether Link's direction is in this window
+        const double link_change = gain_along(speed, link.yaw);
+        if ((YawDifference(link.yaw, uphill_yaw) > 0) == (side > 0) &&
+            (change > 0 ? link_change > 0 : link_change < 0) &&
+            std::fabs(link_change) < max_change) {
             text += QStringLiteral("<br>") +
                     Colored(tr("Link's direction is in this window ✓"), "#20a020");
         }
