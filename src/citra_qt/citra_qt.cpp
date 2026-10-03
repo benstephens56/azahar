@@ -63,6 +63,7 @@
 #endif
 #include "citra_qt/debugger/memory_search.h"
 #include "citra_qt/debugger/memory_watch.h"
+#include "citra_qt/debugger/movement_recorder.h"
 #include "citra_qt/debugger/registers.h"
 #include "citra_qt/debugger/seam_calculator.h"
 #include "citra_qt/debugger/tas_editor.h"
@@ -765,6 +766,15 @@ void GMainWindow::InitializeDebugWidgets() {
             &SeamCalculatorWidget::OnEmulationStarting);
     connect(this, &GMainWindow::EmulationStopping, seamCalculatorWidget,
             &SeamCalculatorWidget::OnEmulationStopping);
+
+    movementRecorderWidget = new MovementRecorderWidget(system, this);
+    addDockWidget(Qt::RightDockWidgetArea, movementRecorderWidget);
+    movementRecorderWidget->hide();
+    debug_menu->addAction(movementRecorderWidget->toggleViewAction());
+    connect(this, &GMainWindow::EmulationStarting, movementRecorderWidget,
+            &MovementRecorderWidget::OnEmulationStarting);
+    connect(this, &GMainWindow::EmulationStopping, movementRecorderWidget,
+            &MovementRecorderWidget::OnEmulationStopping);
 
     tasInputWidget = new TasInputWidget(system, this);
     addDockWidget(Qt::RightDockWidgetArea, tasInputWidget);

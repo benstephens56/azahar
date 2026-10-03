@@ -313,6 +313,14 @@ public:
         return input_override;
     }
 
+    /// Sets a function that is called on the emulator thread at the end of every emulated frame
+    /// (vblank), before frame limiting, for frontend tools that sample memory once per frame. An
+    /// empty function removes it.
+    void SetFrameEndCallback(std::function<void()> callback);
+
+    /// Called by the renderer at the end of every emulated frame
+    void OnFrameEnd();
+
     /// Gets a const reference to the movie recorder
     [[nodiscard]] const Core::Movie& Movie() const;
 
@@ -572,6 +580,10 @@ private:
     std::string m_chainloadpath;
     std::optional<u8> m_mem_mode;
     u64 title_id;
+
+    std::mutex frame_end_mutex;
+    std::function<void()> frame_end_callback;
+    std::atomic_bool has_frame_end_callback{};
 
     std::mutex signal_mutex;
     Signal current_signal;

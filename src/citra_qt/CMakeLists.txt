@@ -127,6 +127,9 @@ add_library(citra_qt STATIC EXCLUDE_FROM_ALL
     debugger/memory_watch.cpp
     debugger/memory_watch.h
     debugger/registers.cpp
+    debugger/movement_recorder.cpp
+    debugger/movement_recorder.h
+    debugger/oot3d_memory.h
     debugger/seam_calculator.cpp
     debugger/seam_calculator.h
     debugger/seam_math.h

@@ -89,6 +89,22 @@ System::System() : movie{*this}, cheat_engine{*this}, memory_editor{*this} {
 
 System::~System() = default;
 
+void System::SetFrameEndCallback(std::function<void()> callback) {
+    std::scoped_lock lock{frame_end_mutex};
+    has_frame_end_callback = static_cast<bool>(callback);
+    frame_end_callback = std::move(callback);
+}
+
+void System::OnFrameEnd() {
+    if (!has_frame_end_callback) {
+        return;
+    }
+    std::scoped_lock lock{frame_end_mutex};
+    if (frame_end_callback) {
+        frame_end_callback();
+    }
+}
+
 System::ResultStatus System::RunLoop(bool tight_loop) {
     status = ResultStatus::Success;
 

@@ -48,6 +48,7 @@ void RendererBase::EndFrame() {
     current_frame++;
 
     system.perf_stats->EndSystemFrame();
+    system.OnFrameEnd();
 
     render_window.PollEvents();
 

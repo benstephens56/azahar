@@ -25,6 +25,7 @@
 #include <QTableWidget>
 #include <QVBoxLayout>
 #include <fmt/format.h>
+#include "citra_qt/debugger/oot3d_memory.h"
 #include "citra_qt/debugger/seam_calculator.h"
 #include "common/file_util.h"
 #include "core/core.h"
@@ -32,26 +33,7 @@
 
 namespace {
 
-// Offsets in the Actor struct (see include/z3D/z3Dactor.h of the OoT3D practice menu)
-constexpr VAddr OffsetWorldPos = 0x028;
-constexpr VAddr OffsetFloorHeight = 0x084;
-constexpr VAddr OffsetBgCheckFlags = 0x090;
-constexpr VAddr OffsetPrevPos = 0x108;
-constexpr VAddr OffsetWorldRotY = 0x036;
-constexpr VAddr OffsetSpeedXZ = 0x06C;
-constexpr VAddr OffsetActorType = 0x002;
-constexpr u8 ActorTypePlayer = 2;
-
-// Offsets in the GlobalContext and Camera structs (see include/z3D/z3D.h of the practice menu)
-constexpr VAddr OffsetMainCamera = 0x364;
-constexpr VAddr OffsetCameraGlobalContext = 0x0D4;
-constexpr VAddr OffsetCameraPtrs = 0xA54;
-constexpr VAddr OffsetActiveCamera = 0xA64;
-constexpr VAddr OffsetCameraInputYaw = 0x17E; // inputDir.y
-/// actorCtx (0x208C) .actorList (0x0C) [ACTORTYPE_PLAYER] (2 * 8) .first (4)
-constexpr VAddr OffsetPlayerActor = 0x208C + 0x0C + 2 * 8 + 4;
-
-constexpr u16 BgCheckGround = 0x0001;
+using namespace OoT3D;
 
 QString SettingsPath() {
     return QString::fromStdString(
@@ -405,40 +387,20 @@ void SeamCalculatorWidget::FindGlobalContext() {
     if (!emulation_running) {
         return;
     }
-    // The main camera keeps a pointer to the GlobalContext it is part of, so the GlobalContext is
-    // at the value of the one word that points to 0x364 + 0xD4 bytes before the word itself
-    auto snapshot = system.MemoryEditor().SnapshotWritableMemory(std::chrono::milliseconds{2000});
-    if (!snapshot) {
+    VAddr found = 0;
+    const auto result = OoT3D::FindGlobalContext(system.MemoryEditor(), found);
+    if (result == OoT3D::FindResult::NoMemory) {
         QMessageBox::warning(this, tr("Seam Calculator"),
                              tr("Could not read the memory. Is the game running?"));
         return;
     }
-    constexpr VAddr Offset = OffsetMainCamera + OffsetCameraGlobalContext;
-    std::optional<VAddr> found;
-    for (const auto& region : *snapshot) {
-        for (std::size_t i = 0; i + 4 <= region.data.size() && !found; i += 4) {
-            u32 value;
-            std::memcpy(&value, region.data.data() + i, sizeof(value));
-            if (value == 0 || region.base + i != value + Offset) {
-                continue;
-            }
-            // Check that it holds Link's actor
-            const auto player = ReadU32(value + OffsetPlayerActor);
-            const auto type = player && *player
-                                  ? system.MemoryEditor().Peek(*player + OffsetActorType, 1)
-                                  : std::nullopt;
-            if (type && (*type)[0] == ActorTypePlayer) {
-                found = value;
-            }
-        }
-    }
-    if (!found) {
+    if (result == OoT3D::FindResult::NotFound) {
         QMessageBox::warning(this, tr("Seam Calculator"),
                              tr("Could not find the GlobalContext. Try again while playing (not "
                                 "on the title screen or file select)."));
         return;
     }
-    context_edit->setText(QStringLiteral("0x%1").arg(*found, 8, 16, QLatin1Char('0')));
+    context_edit->setText(QStringLiteral("0x%1").arg(found, 8, 16, QLatin1Char('0')));
     SaveSettings();
     Update();
 }
