@@ -81,11 +81,8 @@ private:
     void UpdateMount(const SeamMath::Triangle& tri, const LinkState& link);
     void UpdateClimb(const SeamMath::Triangle& tri, const LinkState& link);
     void ClearLive();
-    /// Shows which triangle Link stands on and how he actually moved last frame
-    void UpdateCheck(const LinkState& link);
-    /// Circle pad position (in TAS Input units) that makes Link go along `yaw`, if the camera is
-    /// known. Returns {x, y, resulting yaw}.
-    std::optional<std::array<int, 3>> StickFor(u16 yaw, const LinkState& link) const;
+    /// Measures how far Link moves per frame per unit of speed
+    void UpdateStepRatio(const LinkState& link);
     /// Most the seam may rise per unit walked at the climbing speed, for Link to stay on it
     double ClimbMaxRise() const;
     void MoveLinkToTarget();
@@ -109,19 +106,20 @@ private:
     QLineEdit* normal_edit;
     QLineEdit* dist_edit;
     QLabel* triangle_label;
-    QLabel* link_label;
 
     // Getting onto the seam
     QLabel* mount_status_label;
-    QLabel* target_label;
-    QLabel* walk_label;
+    /// Target, Link and difference for X (0-2) and Z (3-5)
+    std::array<QLabel*, 6> target_cells{};
+    QLabel* angle_label;
     QPushButton* move_button;
 
     // Climbing
     QLabel* next_frame_label;
-    QLabel* check_label;
-    QPushButton* use_floor_button;
+    QLabel* remaining_label;
+    QLabel* best_line_label;
     QLabel* options_label;
+    QDoubleSpinBox* climb_rate_spin;
     QDoubleSpinBox* climb_step_spin;
     /// Cached searches (they're slow to redo every update): what they were computed for
     std::array<double, 4> climb_lines_key{};
@@ -130,8 +128,6 @@ private:
     std::optional<SeamMath::MountClimb> mount_climb;
     /// Distance Link moves per frame per unit of speed, as last measured
     double step_ratio = 1.0;
-    std::array<QLabel*, 2> way_labels{};
-    QSpinBox* stick_magnitude_spin;
 
     QString collision_path;
     QTimer update_timer;
