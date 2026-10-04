@@ -49,6 +49,7 @@
 #include "citra_qt/configuration/config.h"
 #include "citra_qt/configuration/configure_dialog.h"
 #include "citra_qt/configuration/configure_per_game.h"
+#include "citra_qt/dead_space_docks.h"
 #include "citra_qt/debugger/console.h"
 #include "citra_qt/debugger/graphics/graphics.h"
 #include "citra_qt/debugger/graphics/graphics_breakpoints.h"
@@ -1083,6 +1084,12 @@ void GMainWindow::RestoreUIState() {
 
     ui->action_Show_Status_Bar->setChecked(UISettings::values.show_status_bar.GetValue());
     statusBar()->setVisible(ui->action_Show_Status_Bar->isChecked());
+
+    // Tool windows can dock into the empty parts of the render window
+    dead_space_docks = new DeadSpaceDocks(this, render_window);
+    for (QDockWidget* dock : findChildren<QDockWidget*>()) {
+        dead_space_docks->AddDock(dock);
+    }
 }
 
 void GMainWindow::OnAppFocusStateChanged(Qt::ApplicationState state) {
@@ -3317,6 +3324,9 @@ void GMainWindow::OnCreateGraphicsSurfaceViewer() {
     auto graphicsSurfaceViewerWidget =
         new GraphicsSurfaceWidget(system, Pica::g_debug_context, this);
     addDockWidget(Qt::RightDockWidgetArea, graphicsSurfaceViewerWidget);
+    if (dead_space_docks) {
+        dead_space_docks->AddDock(graphicsSurfaceViewerWidget);
+    }
     // TODO: Maybe graphicsSurfaceViewerWidget->setFloating(true);
     graphicsSurfaceViewerWidget->show();
 }

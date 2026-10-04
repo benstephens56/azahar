@@ -94,6 +94,8 @@ add_library(citra_qt STATIC EXCLUDE_FROM_ALL
     configuration/configure_cheats.cpp
     configuration/configure_cheats.h
     configuration/configure_cheats.ui
+    dead_space_docks.cpp
+    dead_space_docks.h
     debugger/console.h
     debugger/console.cpp
     debugger/graphics/graphics.cpp

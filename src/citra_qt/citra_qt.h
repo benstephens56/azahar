@@ -45,6 +45,7 @@ class GPUCommandStreamWidget;
 class GraphicsBreakPointsWidget;
 class GraphicsTracingWidget;
 class GraphicsVertexShaderWidget;
+class DeadSpaceDocks;
 class GRenderWindow;
 class IPCRecorderWidget;
 class LLEServiceModulesWidget;
@@ -442,6 +443,7 @@ private:
     RegistersWidget* registersWidget{};
     MemoryWatchWidget* memoryWatchWidget{};
     SeamCalculatorWidget* seamCalculatorWidget{};
+    DeadSpaceDocks* dead_space_docks{};
     MemorySearchWidget* memorySearchWidget{};
     TasInputWidget* tasInputWidget{};
     TasEditorWidget* tasEditorWidget{};
