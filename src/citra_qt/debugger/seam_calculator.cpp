@@ -583,7 +583,6 @@ void SeamCalculatorWidget::UpdateClimb(const SeamMath::Triangle& tri, const Link
     };
     const double rise = tri.RisePerUnit();
     const auto [ux, uz] = tri.UphillDirection();
-    const u16 uphill_yaw = YawOf(ux, uz);
     const float here = tri.HeightAt(link.x, link.z);
     const bool on_seam = tri.ContainsXZ(link.x, link.z) && (link.bg_check_flags & BgCheckGround) &&
                          std::fabs(here - link.y) < 0.5f;
@@ -661,18 +660,15 @@ void SeamCalculatorWidget::UpdateClimb(const SeamMath::Triangle& tri, const Link
         options_label->clear();
         return;
     }
-    const double end_x = link.x + best->length * std::sin(YawToRadians(best->yaw));
-    const double end_z = link.z + best->length * std::cos(YawToRadians(best->yaw));
-    QString text = tr("<b>%1</b>: +%2 over %3 units")
+    const double rise_along = best->gain / best->length;
+    QString text = tr("<b>%1</b>: +%2 over %3 units, +%4 per frame at a step of %5")
                        .arg(hex(best->yaw))
                        .arg(best->gain, 0, 'f', 0)
-                       .arg(best->length, 0, 'f', 3);
-    text += QStringLiteral("<br>") + tr("Ends at X %1  Z %2 (seam height %3); level direction %4")
-                                         .arg(end_x, 0, 'f', 3)
-                                         .arg(end_z, 0, 'f', 3)
-                                         .arg(link.y + best->gain, 0, 'f', 0)
-                                         .arg(hex(static_cast<u16>(uphill_yaw + 0x4000)))
-                                         .toHtmlEscaped();
+                       .arg(best->length, 0, 'f', 3)
+                       .arg(rise_along * climb_step_spin->value(), 0, 'f', 1)
+                       .arg(climb_step_spin->value());
+    text += QStringLiteral("<br>") +
+            tr("Ends at height %1").arg(link.y + best->gain, 0, 'f', 0).toHtmlEscaped();
     best_line_label->setText(text);
 
     // The best lines for slower steps, to see what walking slower would give. Ones slower than

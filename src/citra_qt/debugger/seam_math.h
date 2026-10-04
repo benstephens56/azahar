@@ -378,8 +378,8 @@ inline std::vector<ClimbLine> AllClimbLines(const Triangle& tri, double x, doubl
  * walked (so that Link, moving a given distance per frame, gains under 50 per frame). Each line is
  * judged by the worst of the directions within `tolerance` of it, so that it still works when Link
  * goes slightly off it (the best lines can be right next to ones crossing a gap in the seam). Of
- * the lines gaining almost as much (99%), the gentlest one, which leaves the most room for Link's
- * speed.
+ * the lines gaining almost as much (99%), the steepest one still within `max_rise`, which climbs
+ * the fastest.
  */
 inline std::optional<ClimbLine> PickClimbLine(std::span<const ClimbLine> lines, double max_rise,
                                               int tolerance = 8) {
@@ -405,13 +405,15 @@ inline std::optional<ClimbLine> PickClimbLine(std::span<const ClimbLine> lines, 
     if (!best || robust[*best] <= 0.0) {
         return std::nullopt;
     }
-    std::size_t gentlest = *best;
+    std::size_t steepest = *best;
     for (std::size_t i = 0; i < lines.size(); ++i) {
-        if (robust[i] >= 0.99 * robust[*best] && rise_of(lines[i]) < rise_of(lines[gentlest])) {
-            gentlest = i;
+        const double rise = rise_of(lines[i]);
+        if (robust[i] >= 0.99 * robust[*best] && rise <= max_rise &&
+            rise > rise_of(lines[steepest])) {
+            steepest = i;
         }
     }
-    return lines[gentlest];
+    return lines[steepest];
 }
 
 /**
