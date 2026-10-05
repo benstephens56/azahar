@@ -532,6 +532,152 @@ inline std::optional<ClimbLine> BestClimbLine(
  */
 constexpr float LevelTolerance = 100.0f;
 
+/// Link's (adult) wall check: a sphere this far up from his feet, with this radius (Player)
+constexpr float WallCheckHeight = 26.0f;
+constexpr float WallCheckRadius = 18.0f;
+
+/// Triangles near a seam that act as walls for Link (neither floors nor ceilings), but the seam
+inline std::vector<const Triangle*> WallsNear(const Triangle& seam,
+                                              std::span<const Triangle> collision) {
+    const auto [seam_min_x, seam_max_x] =
+        std::minmax({seam.vertices[0][0], seam.vertices[1][0], seam.vertices[2][0]});
+    const auto [seam_min_z, seam_max_z] =
+        std::minmax({seam.vertices[0][2], seam.vertices[1][2], seam.vertices[2][2]});
+    const float margin = WallCheckRadius + 2.0f;
+    std::vector<const Triangle*> walls;
+    for (const auto& tri : collision) {
+        if (&tri == &seam || tri.Ny() > 0.5f || tri.Ny() < -0.8f) {
+            continue;
+        }
+        const auto [min_x, max_x] =
+            std::minmax({tri.vertices[0][0], tri.vertices[1][0], tri.vertices[2][0]});
+        const auto [min_z, max_z] =
+            std::minmax({tri.vertices[0][2], tri.vertices[1][2], tri.vertices[2][2]});
+        if (seam_max_x + margin < min_x || seam_min_x - margin > max_x ||
+            seam_max_z + margin < min_z || seam_min_z - margin > max_z) {
+            continue;
+        }
+        walls.push_back(&tri);
+    }
+    return walls;
+}
+
+/**
+ * Whether (a, b) is on a triangle with corners (a0, b0), (a1, b1), (a2, b2) projected along an
+ * axis: within `check_dist` of a corner, "inside" with a determinant leniency of `det_max`, or
+ * within `check_dist` of an edge when the normal's part along that axis is over 0.5
+ * (Math3D_TriChkPointPara*Impl)
+ */
+inline bool TriChkPointPara(const std::array<std::array<float, 2>, 3>& v, float a, float b,
+                            float det_max, float check_dist, float normal_part) {
+    const float min_a = std::min({v[0][0], v[1][0], v[2][0]}) - check_dist;
+    const float max_a = std::max({v[0][0], v[1][0], v[2][0]}) + check_dist;
+    const float min_b = std::min({v[0][1], v[1][1], v[2][1]}) - check_dist;
+    const float max_b = std::max({v[0][1], v[1][1], v[2][1]}) + check_dist;
+    if (a < min_a || a > max_a || b < min_b || b > max_b) {
+        return false;
+    }
+    const float check_dist_sq = check_dist * check_dist;
+    for (const auto& c : v) {
+        if ((c[0] - a) * (c[0] - a) + (c[1] - b) * (c[1] - b) < check_dist_sq) {
+            return true;
+        }
+    }
+    const auto det = [&](const std::array<float, 2>& p, const std::array<float, 2>& q) {
+        return (p[0] - a) * (q[1] - b) - (p[1] - b) * (q[0] - a);
+    };
+    const float d01 = det(v[0], v[1]);
+    const float d12 = det(v[1], v[2]);
+    const float d20 = det(v[2], v[0]);
+    if ((d01 <= det_max && d12 <= det_max && d20 <= det_max) ||
+        (d01 >= -det_max && d12 >= -det_max && d20 >= -det_max)) {
+        return true;
+    }
+    if (std::fabs(normal_part) > 0.5f) {
+        for (int i = 0; i < 3; ++i) {
+            const auto& p = v[i];
+            const auto& q = v[(i + 1) % 3];
+            const float ea = q[0] - p[0];
+            const float eb = q[1] - p[1];
+            const float length_sq = ea * ea + eb * eb;
+            if (length_sq == 0.0f) {
+                continue;
+            }
+            const float t = ((a - p[0]) * ea + (b - p[1]) * eb) / length_sq;
+            if (t < 0.0f || t > 1.0f) {
+                continue;
+            }
+            const float da = p[0] + t * ea - a;
+            const float db = p[1] + t * eb - b;
+            if (da * da + db * db < check_dist_sq) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * Whether one of the walls pushes Link away when he stands at (x, z) with his feet at height y,
+ * so he can't stand there: the game's wall check (BgCheck_SphVsStaticWall) of his wall check
+ * sphere, which finds walls along Z and along X with some leniency.
+ */
+inline bool WallPushes(std::span<const Triangle* const> walls, float x, float y, float z) {
+    const float cy = y + WallCheckHeight;
+    const float radius = WallCheckRadius;
+    for (const Triangle* wall : walls) {
+        const auto& v = wall->vertices;
+        if (cy < v[0][1] && cy < v[1][1] && cy < v[2][1]) {
+            continue;
+        }
+        const float nx = wall->Nx();
+        const float ny = wall->Ny();
+        const float nz = wall->Nz();
+        const float plane_dist = nx * x + ny * cy + nz * z + wall->dist;
+        const float normal_xz = std::sqrt(nx * nx + nz * nz);
+        if (std::fabs(plane_dist) > radius || normal_xz == 0.0f) {
+            continue;
+        }
+        // Along Z: walls facing mostly along Z, at (x, y) in their XY projection
+        const float along_z = std::fabs(nz) / normal_xz;
+        if (along_z >= 0.4f && !IsZero(nz)) {
+            const float min_z = std::min({v[0][2], v[1][2], v[2][2]}) - radius;
+            const float max_z = std::max({v[0][2], v[1][2], v[2][2]}) + radius;
+            const std::array<std::array<float, 2>, 3> projected{{
+                {static_cast<float>(v[0][0]), static_cast<float>(v[0][1])},
+                {static_cast<float>(v[1][0]), static_cast<float>(v[1][1])},
+                {static_cast<float>(v[2][0]), static_cast<float>(v[2][1])},
+            }};
+            if (z >= min_z && z <= max_z && TriChkPointPara(projected, x, cy, 300.0f, 1.0f, nz)) {
+                const float intersect = (-nx * x - ny * cy - wall->dist) / nz;
+                const float distance = intersect - z;
+                if (std::fabs(distance) <= radius / along_z && distance * nz <= 4.0f) {
+                    return true;
+                }
+            }
+        }
+        // Along X: walls facing mostly along X, at (y, z) in their YZ projection
+        const float along_x = std::fabs(nx) / normal_xz;
+        if (along_x >= 0.4f && !IsZero(nx)) {
+            const float min_x = std::min({v[0][0], v[1][0], v[2][0]}) - radius;
+            const float max_x = std::max({v[0][0], v[1][0], v[2][0]}) + radius;
+            const std::array<std::array<float, 2>, 3> projected{{
+                {static_cast<float>(v[0][1]), static_cast<float>(v[0][2])},
+                {static_cast<float>(v[1][1]), static_cast<float>(v[1][2])},
+                {static_cast<float>(v[2][1]), static_cast<float>(v[2][2])},
+            }};
+            if (x >= min_x && x <= max_x && TriChkPointPara(projected, cy, z, 300.0f, 1.0f, nx)) {
+                const float intersect = (-ny * cy - nz * z - wall->dist) / nx;
+                const float distance = intersect - x;
+                if (std::fabs(distance) <= radius / along_x && distance * nx <= 4.0f) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 /// Where Link can step onto a seam from a floor: the seam is at the floor's height there
 struct MountSpot {
     std::array<float, 2> point; ///< X, Z
@@ -556,6 +702,7 @@ inline std::optional<MountSpot> FindMountSpot(const Triangle& seam,
     const double s_nz = seam.Nz() / seam.Ny();
     const double s_d = seam.dist / seam.Ny();
     const double radius = CheckDist * 0.999;
+    const auto walls = WallsNear(seam, collision);
 
     std::optional<MountSpot> best;
     double best_distance = 0.0;
@@ -609,7 +756,8 @@ inline std::optional<MountSpot> FindMountSpot(const Triangle& seam,
                     const float pz = static_cast<float>(foot_z + dir_z * t);
                     ok = floor->ContainsXZ(px, pz) &&
                          (!near_height ||
-                          std::fabs(floor->HeightAt(px, pz) - *near_height) <= LevelTolerance);
+                          std::fabs(floor->HeightAt(px, pz) - *near_height) <= LevelTolerance) &&
+                         !WallPushes(walls, px, floor->HeightAt(px, pz), pz);
                     if (ok) {
                         const float height = floor->HeightAt(px, pz);
                         for (const Triangle* other : floors) {
@@ -750,6 +898,7 @@ inline std::optional<MountClimb> BestMountClimb(const Triangle& seam,
         }
         floors.push_back(&tri);
     }
+    const auto walls = WallsNear(seam, collision);
     const auto mountable = [&](const Triangle* floor, float px, float pz) {
         if (!seam.ContainsXZ(px, pz) || !floor->ContainsXZ(px, pz)) {
             return false;
@@ -763,7 +912,8 @@ inline std::optional<MountClimb> BestMountClimb(const Triangle& seam,
                 }
             }
         }
-        return true;
+        // Somewhere Link can stand, not kept away by a wall
+        return !WallPushes(walls, px, height, pz);
     };
 
     std::optional<MountClimb> best;
