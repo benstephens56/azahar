@@ -486,11 +486,16 @@ void SeamCalculatorWidget::UpdateMount(const SeamMath::Triangle& tri, const Link
     // climbing speed
     std::optional<MountClimb> climb;
     if (!on_seam) {
-        const std::array<double, 4> key{static_cast<double>(tri.index), tri.dist,
-                                        static_cast<double>(collision.size()), ClimbMaxRise()};
+        // On Link's level first: the same spot can have floors far above or below his
+        const std::array<double, 5> key{static_cast<double>(tri.index), tri.dist,
+                                        static_cast<double>(collision.size()), ClimbMaxRise(),
+                                        std::round(link.y / 10.0)};
         if (key != mount_climb_key) {
             mount_climb_key = key;
-            mount_climb = BestMountClimb(tri, collision, ClimbMaxRise());
+            mount_climb = BestMountClimb(tri, collision, ClimbMaxRise(), link.y);
+            if (!mount_climb) {
+                mount_climb = BestMountClimb(tri, collision, ClimbMaxRise());
+            }
         }
         climb = mount_climb;
     }
@@ -501,7 +506,11 @@ void SeamCalculatorWidget::UpdateMount(const SeamMath::Triangle& tri, const Link
         });
         floor = it != collision.end() ? &*it : nullptr;
     } else if (!on_seam) {
-        if (const auto spot = FindMountSpot(tri, collision, link.x, link.z)) {
+        auto spot = FindMountSpot(tri, collision, link.x, link.z, link.y);
+        if (!spot) {
+            spot = FindMountSpot(tri, collision, link.x, link.z);
+        }
+        if (spot) {
             target = spot->point;
             const auto it =
                 std::find_if(collision.begin(), collision.end(),

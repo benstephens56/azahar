@@ -127,7 +127,7 @@ private:
     std::vector<SeamMath::ClimbLine> climb_lines;
     std::array<double, 4> best_line_settings_key{};
     QElapsedTimer best_line_timer;
-    std::array<double, 4> mount_climb_key{};
+    std::array<double, 5> mount_climb_key{};
     std::optional<SeamMath::MountClimb> mount_climb;
     /// Distance Link moves per frame per unit of speed, as last measured
     double step_ratio = 1.0;
