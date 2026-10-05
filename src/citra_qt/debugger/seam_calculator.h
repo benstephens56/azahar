@@ -8,6 +8,7 @@
 #include <optional>
 #include <vector>
 #include <QDockWidget>
+#include <QElapsedTimer>
 #include <QTimer>
 #include "citra_qt/debugger/seam_math.h"
 #include "common/common_types.h"
@@ -124,6 +125,8 @@ private:
     /// Cached searches (they're slow to redo every update): what they were computed for
     std::array<double, 4> climb_lines_key{};
     std::vector<SeamMath::ClimbLine> climb_lines;
+    std::array<double, 4> best_line_settings_key{};
+    QElapsedTimer best_line_timer;
     std::array<double, 4> mount_climb_key{};
     std::optional<SeamMath::MountClimb> mount_climb;
     /// Distance Link moves per frame per unit of speed, as last measured

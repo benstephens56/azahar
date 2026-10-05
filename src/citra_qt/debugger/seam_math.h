@@ -373,17 +373,8 @@ inline std::vector<ClimbLine> AllClimbLines(const Triangle& tri, double x, doubl
     return lines;
 }
 
-/**
- * Among `lines`, the one that climbs the most where the seam rises at most `max_rise` per unit
- * walked (so that Link, moving a given distance per frame, gains under 50 per frame). Each line is
- * judged by the worst of the directions within `tolerance` of it, so that it still works when Link
- * goes slightly off it (the best lines can be right next to ones crossing a gap in the seam). Of
- * the lines gaining almost as much (99%), the steepest one still within `max_rise`, which climbs
- * the fastest.
- */
-inline std::optional<ClimbLine> PickClimbLine(std::span<const ClimbLine> lines, double max_rise,
-                                              int tolerance = 8) {
-    const auto rise_of = [](const ClimbLine& line) { return line.gain / line.length; };
+/// Each line's gain, as the worst of the directions within `tolerance` of it
+inline std::vector<double> RobustGains(std::span<const ClimbLine> lines, int tolerance) {
     std::vector<double> gain_by_yaw(0x10000, 0.0);
     for (const auto& line : lines) {
         gain_by_yaw[line.yaw] = line.gain;
@@ -396,6 +387,21 @@ inline std::optional<ClimbLine> PickClimbLine(std::span<const ClimbLine> lines, 
         }
         robust[i] = worst;
     }
+    return robust;
+}
+
+/**
+ * Among `lines`, the one that climbs the most where the seam rises at most `max_rise` per unit
+ * walked (so that Link, moving a given distance per frame, gains under 50 per frame). Each line is
+ * judged by the worst of the directions within `tolerance` of it, so that it still works when Link
+ * goes slightly off it (the best lines can be right next to ones crossing a gap in the seam). Of
+ * the lines gaining almost as much (99%), the steepest one still within `max_rise`, which climbs
+ * the fastest.
+ */
+inline std::optional<ClimbLine> PickClimbLine(std::span<const ClimbLine> lines, double max_rise,
+                                              int tolerance = 8) {
+    const auto rise_of = [](const ClimbLine& line) { return line.gain / line.length; };
+    const auto robust = RobustGains(lines, tolerance);
     std::optional<std::size_t> best;
     for (std::size_t i = 0; i < lines.size(); ++i) {
         if (rise_of(lines[i]) <= max_rise && (!best || robust[i] > robust[*best])) {
@@ -414,6 +420,99 @@ inline std::optional<ClimbLine> PickClimbLine(std::span<const ClimbLine> lines, 
         }
     }
     return lines[steepest];
+}
+
+/// Walking a straight line frame by frame, as the game computes it
+struct ClimbSimulation {
+    int frames = 0;          ///< Frames Link stays on the seam
+    float worst_gain = 0.0f; ///< Most height gained in a frame
+    float end_height = 0.0f; ///< Height at the last frame on the seam
+    bool falls = false;      ///< A frame gains 50 or more: Link falls off there
+};
+
+/**
+ * Walks Link from (x, z) at height y along `yaw`, `step` per frame, in the game's float math. On
+ * steep seams, heights are only computed to a unit or two, so the gain per frame isn't constant
+ * and its worst frame is what matters.
+ */
+inline ClimbSimulation SimulateClimb(const Triangle& tri, float x, float z, float y, u16 yaw,
+                                     double step) {
+    ClimbSimulation result;
+    result.end_height = y;
+    const double angle = YawToRadians(yaw);
+    const float step_x = static_cast<float>(step * std::sin(angle));
+    const float step_z = static_cast<float>(step * std::cos(angle));
+    // Long enough for any seam, in case a line never leaves one
+    for (int frame = 0; frame < 100000; ++frame) {
+        x += step_x;
+        z += step_z;
+        if (!tri.ContainsXZ(x, z)) {
+            break;
+        }
+        const float height = tri.HeightAt(x, z);
+        const float gain = height - result.end_height;
+        if (gain >= FloorCheckHeight) {
+            result.falls = true;
+            result.worst_gain = gain;
+            break;
+        }
+        result.worst_gain = std::max(result.worst_gain, gain);
+        // Link stays at his height when the seam goes down a little under him
+        result.end_height = std::max(result.end_height, height);
+        ++result.frames;
+    }
+    return result;
+}
+
+/**
+ * Among `lines` from (x, z) at height y, the one that climbs the most when walked `step` per frame
+ * without any frame gaining more than `max_gain` (checked frame by frame), judged like
+ * PickClimbLine. Of the lines climbing almost as much (99%), the steepest one.
+ */
+inline std::optional<ClimbLine> PickSimulatedClimbLine(const Triangle& tri,
+                                                       std::span<const ClimbLine> lines, float x,
+                                                       float z, float y, double step,
+                                                       double max_gain, int tolerance = 8) {
+    const auto rise_of = [](const ClimbLine& line) { return line.gain / line.length; };
+    const auto robust = RobustGains(lines, tolerance);
+    // Candidates: lines that can't gain much more per frame than allowed (as the gain per frame
+    // varies by a unit or two), and that climb about as much as the best of those
+    const double max_rise = (max_gain + 3.0) / step;
+    double best_robust = 0.0;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        if (rise_of(lines[i]) <= max_rise) {
+            best_robust = std::max(best_robust, robust[i]);
+        }
+    }
+    struct Candidate {
+        std::size_t index;
+        double gain;
+    };
+    std::vector<Candidate> valid;
+    double best_gain = 0.0;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        if (rise_of(lines[i]) > max_rise || robust[i] < 0.9 * best_robust) {
+            continue;
+        }
+        const auto simulation = SimulateClimb(tri, x, z, y, lines[i].yaw, step);
+        if (simulation.falls || simulation.worst_gain > max_gain || simulation.frames == 0) {
+            continue;
+        }
+        const double gain = simulation.end_height - y;
+        valid.push_back({i, gain});
+        best_gain = std::max(best_gain, gain);
+    }
+    std::optional<std::size_t> steepest;
+    for (const auto& candidate : valid) {
+        if (candidate.gain >= 0.99 * best_gain &&
+            (!steepest || rise_of(lines[candidate.index]) > rise_of(lines[*steepest]))) {
+            steepest = candidate.index;
+        }
+    }
+    if (!steepest || best_gain <= 0.0) {
+        return std::nullopt;
+    }
+    return lines[*steepest];
 }
 
 /**

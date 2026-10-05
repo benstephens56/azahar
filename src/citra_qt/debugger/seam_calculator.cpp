@@ -7,6 +7,7 @@
 #include <cstring>
 #include <limits>
 #include <QDoubleSpinBox>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -632,11 +633,12 @@ void SeamCalculatorWidget::UpdateClimb(const SeamMath::Triangle& tri, const Link
                 Colored(tr("Too fast: +%1 per frame, Link walks off").arg(per_frame, 0, 'f', 1),
                         "#c03030"));
         } else {
-            remaining_label->setText(tr("<b>%1 frames</b> (to Y %2, %3%4 per frame)")
+            remaining_label->setText(tr("<b>%1 frames</b> (to Y %2, %3%4 per frame, step %5)")
                                          .arg(frames, 0, 'f', 0)
                                          .arg(link.y + rise_along * frames * step, 0, 'f', 0)
                                          .arg(per_frame >= 0.0 ? QStringLiteral("+") : QString{})
-                                         .arg(per_frame, 0, 'f', 1));
+                                         .arg(per_frame, 0, 'f', 1)
+                                         .arg(step, 0, 'f', 4));
         }
     }
 
@@ -644,37 +646,64 @@ void SeamCalculatorWidget::UpdateClimb(const SeamMath::Triangle& tri, const Link
     // seam (its triangle or vertex circles), times how much the seam rises per unit in that
     // direction. Link falls off if he gains 50 or more in a frame, so the steeper the line, the
     // slower he has to walk it.
+    // Slow to work out, so while Link moves it's redone a few times a second, and right away when
+    // the seam or the settings change
+    const std::array<double, 4> settings_key{static_cast<double>(tri.index), tri.dist,
+                                             climb_rate_spin->value(), climb_step_spin->value()};
+    const bool moved = link.x != climb_lines_key[2] || link.z != climb_lines_key[3];
+    if (settings_key == best_line_settings_key && moved && best_line_timer.isValid() &&
+        best_line_timer.elapsed() < 250) {
+        return;
+    }
+    best_line_settings_key = settings_key;
+    best_line_timer.start();
     const std::array<double, 4> key{static_cast<double>(tri.index), tri.dist, link.x, link.z};
     if (key != climb_lines_key) {
         climb_lines_key = key;
         climb_lines = AllClimbLines(tri, link.x, link.z);
     }
     const double rate = climb_rate_spin->value();
-    const auto best = PickClimbLine(climb_lines, ClimbMaxRise());
+    // Checked frame by frame at the slowest step: heights on steep seams are only computed to a
+    // unit or two, so the gain varies from frame to frame
+    const double slowest_step = climb_step_spin->value();
+    const auto best =
+        PickSimulatedClimbLine(tri, climb_lines, link.x, link.z, link.y, slowest_step, rate);
     if (!best) {
         best_line_label->setText(
             (tri.ContainsXZ(link.x, link.z)
-                 ? tr("No straight line climbs from here.")
+                 ? tr("No straight line climbs from here at this climb speed and step.")
                  : tr("Link is off the seam: get on it first, then the best line shows here."))
                 .toHtmlEscaped());
         options_label->clear();
         return;
     }
-    const double rise_along = best->gain / best->length;
-    QString text = tr("<b>%1</b>: +%2 over %3 units, +%4 per frame at a step of %5")
+    const auto simulation = SimulateClimb(tri, link.x, link.z, link.y, best->yaw, slowest_step);
+    const double gain = simulation.end_height - link.y;
+    QString text = tr("<b>%1</b>: +%2 over %3 frames, +%4 per frame (worst frame +%5) at a "
+                      "step of %6")
                        .arg(hex(best->yaw))
-                       .arg(best->gain, 0, 'f', 0)
-                       .arg(best->length, 0, 'f', 3)
-                       .arg(rise_along * climb_step_spin->value(), 0, 'f', 1)
-                       .arg(climb_step_spin->value());
+                       .arg(gain, 0, 'f', 0)
+                       .arg(simulation.frames)
+                       .arg(gain / std::max(simulation.frames, 1), 0, 'f', 1)
+                       .arg(simulation.worst_gain, 0, 'f', 0)
+                       .arg(slowest_step);
     text += QStringLiteral("<br>") +
-            tr("Ends at height %1").arg(link.y + best->gain, 0, 'f', 0).toHtmlEscaped();
+            tr("Ends at height %1").arg(simulation.end_height, 0, 'f', 0).toHtmlEscaped();
+    // The step setting has to be what Link really moves, or the lines are too steep or too gentle
+    if (on_seam && step > 0.0 && std::fabs(step - slowest_step) > 0.02 * slowest_step) {
+        text += QStringLiteral("<br>") +
+                Colored(tr("Link moved %1 last frame, not %2: use the slowest step he really "
+                           "moves (Use Last Frame's) for the right line")
+                            .arg(step, 0, 'f', 4)
+                            .arg(slowest_step, 0, 'f', 4),
+                        "#c08000");
+    }
     best_line_label->setText(text);
 
     // The best lines for slower steps, to see what walking slower would give. Ones slower than
     // the slowest step are greyed out: at the steps Link can actually move, they gain 50 or more
     // per frame and he walks off.
-    const double slowest = climb_step_spin->value();
+    const double slowest = slowest_step;
     QStringList options;
     std::optional<u16> previous;
     for (const double option_step : {0.2, 0.1, 0.05, 0.03, 0.02, 0.01, 0.005, 0.002}) {
