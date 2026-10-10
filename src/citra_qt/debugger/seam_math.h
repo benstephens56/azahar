@@ -795,23 +795,23 @@ inline std::optional<MountSpot> FindMountSpot(const Triangle& seam,
             float px = static_cast<float>(foot_x + dir_x * t_middle);
             float pz = static_cast<float>(foot_z + dir_z * t_middle);
             std::optional<float> best_gap;
-            double best_offset = 0.0;
+            double best_from_middle = 0.0;
             constexpr int Steps = 256;
             for (int i = 0; i <= Steps; ++i) {
                 const double t = t_start + (t_end - t_start) * i / Steps;
                 const float sx = static_cast<float>(foot_x + dir_x * t);
                 const float sz = static_cast<float>(foot_z + dir_z * t);
                 const float gap = seam.HeightAt(sx, sz) - floor->HeightAt(sx, sz);
-                const double offset = std::fabs(t - t_middle);
+                const double from_middle = std::fabs(t - t_middle);
                 if (gap < 0.0f || !seam.ContainsXZ(sx, sz)) {
                     continue;
                 }
                 if (!best_gap || gap < *best_gap - 0.01f ||
-                    (gap < *best_gap + 0.01f && offset < best_offset)) {
+                    (gap < *best_gap + 0.01f && from_middle < best_from_middle)) {
                     px = sx;
                     pz = sz;
                     best_gap = gap;
-                    best_offset = offset;
+                    best_from_middle = from_middle;
                 }
             }
             const double distance = std::hypot(px - x, pz - z);
