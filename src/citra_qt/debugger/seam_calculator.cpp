@@ -385,12 +385,6 @@ QWidget* SeamCalculatorWidget::CreateClimbGroup() {
     return group;
 }
 
-double SeamCalculatorWidget::ClimbMaxRise() const {
-    // Moving the slowest step per frame, Link gains the climb speed per frame on lines rising this
-    // much per unit
-    return climb_rate_spin->value() / climb_step_spin->value();
-}
-
 void SeamCalculatorWidget::ClearLive() {
     for (QLabel* label : {mount_status_label, angle_label, next_frame_label, remaining_label,
                           best_line_label, options_label}) {
@@ -478,35 +472,21 @@ void SeamCalculatorWidget::UpdateMount(const SeamMath::Triangle& tri, const Link
 
     // Where the seam is right at the height of the floor Link stands on (Link only reliably gets
     // onto a seam there, not anywhere he'd be moved up onto it). With the collision loaded, that's
-    // where the seam's plane meets the floor's plane: a fixed spot that doesn't depend on where
-    // Link is. Without it, the closest spot where the seam is at Link's current height.
+    // where the seam's plane meets the floor's plane, near one of the seam's corners. Without it,
+    // the closest spot where the seam is at Link's current height.
     const SeamMath::Triangle* floor = nullptr;
     target.reset();
-    // With the collision, prefer the spot with the straight line that climbs the most at the
-    // climbing speed
-    std::optional<MountClimb> climb;
+    // The nearest spot to get on from, on Link's level: the same spot can have floors stacked above
+    // or below his (like a raised floor right over the ground), so floors at his height come
+    // first, then ones a little above or below, then any
     if (!on_seam) {
-        // On Link's level first: the same spot can have floors far above or below his
-        const std::array<double, 5> key{static_cast<double>(tri.index), tri.dist,
-                                        static_cast<double>(collision.size()), ClimbMaxRise(),
-                                        std::round(link.y / 10.0)};
-        if (key != mount_climb_key) {
-            mount_climb_key = key;
-            mount_climb = BestMountClimb(tri, collision, ClimbMaxRise(), link.y);
-            if (!mount_climb) {
-                mount_climb = BestMountClimb(tri, collision, ClimbMaxRise());
+        std::optional<MountSpot> spot;
+        for (const auto tolerance : {15.0f, LevelTolerance}) {
+            spot = FindMountSpot(tri, collision, link.x, link.z, link.y, tolerance);
+            if (spot) {
+                break;
             }
         }
-        climb = mount_climb;
-    }
-    if (climb) {
-        target = climb->spot.point;
-        const auto it = std::find_if(collision.begin(), collision.end(), [&](const auto& other) {
-            return other.index == climb->spot.floor_index;
-        });
-        floor = it != collision.end() ? &*it : nullptr;
-    } else if (!on_seam) {
-        auto spot = FindMountSpot(tri, collision, link.x, link.z, link.y);
         if (!spot) {
             spot = FindMountSpot(tri, collision, link.x, link.z);
         }

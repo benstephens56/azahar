@@ -694,7 +694,8 @@ struct MountSpot {
  */
 inline std::optional<MountSpot> FindMountSpot(const Triangle& seam,
                                               std::span<const Triangle> collision, float x, float z,
-                                              std::optional<float> near_height = std::nullopt) {
+                                              std::optional<float> near_height = std::nullopt,
+                                              float level_tolerance = LevelTolerance) {
     if (!seam.IsSeam()) {
         return std::nullopt;
     }
@@ -756,7 +757,7 @@ inline std::optional<MountSpot> FindMountSpot(const Triangle& seam,
                     const float pz = static_cast<float>(foot_z + dir_z * t);
                     ok = floor->ContainsXZ(px, pz) &&
                          (!near_height ||
-                          std::fabs(floor->HeightAt(px, pz) - *near_height) <= LevelTolerance) &&
+                          std::fabs(floor->HeightAt(px, pz) - *near_height) <= level_tolerance) &&
                          !WallPushes(walls, px, floor->HeightAt(px, pz), pz);
                     if (ok) {
                         const float height = floor->HeightAt(px, pz);
@@ -785,9 +786,34 @@ inline std::optional<MountSpot> FindMountSpot(const Triangle& seam,
             if (best_start < 0) {
                 continue;
             }
-            const double t = -half + 2.0 * half * ((best_start + best_end) / 2.0) / Samples;
-            const float px = static_cast<float>(foot_x + dir_x * t);
-            const float pz = static_cast<float>(foot_z + dir_z * t);
+            // Positions are floats, and on a steep seam each step of X or Z can change its
+            // height by about a unit, so it's rarely exactly at the floor's height: take the spot
+            // in the run where it's closest above, nearest the run's middle
+            const double t_start = -half + 2.0 * half * best_start / Samples;
+            const double t_end = -half + 2.0 * half * best_end / Samples;
+            const double t_middle = (t_start + t_end) / 2.0;
+            float px = static_cast<float>(foot_x + dir_x * t_middle);
+            float pz = static_cast<float>(foot_z + dir_z * t_middle);
+            std::optional<float> best_gap;
+            double best_offset = 0.0;
+            constexpr int Steps = 256;
+            for (int i = 0; i <= Steps; ++i) {
+                const double t = t_start + (t_end - t_start) * i / Steps;
+                const float sx = static_cast<float>(foot_x + dir_x * t);
+                const float sz = static_cast<float>(foot_z + dir_z * t);
+                const float gap = seam.HeightAt(sx, sz) - floor->HeightAt(sx, sz);
+                const double offset = std::fabs(t - t_middle);
+                if (gap < 0.0f || !seam.ContainsXZ(sx, sz)) {
+                    continue;
+                }
+                if (!best_gap || gap < *best_gap - 0.01f ||
+                    (gap < *best_gap + 0.01f && offset < best_offset)) {
+                    px = sx;
+                    pz = sz;
+                    best_gap = gap;
+                    best_offset = offset;
+                }
+            }
             const double distance = std::hypot(px - x, pz - z);
             if (!best || distance < best_distance) {
                 best = MountSpot{{px, pz}, floor->HeightAt(px, pz), floor->index, vertex};
@@ -867,7 +893,8 @@ inline std::optional<ClimbLine> QuickClimbLine(const Triangle& tri, double x, do
 inline std::optional<MountClimb> BestMountClimb(const Triangle& seam,
                                                 std::span<const Triangle> collision,
                                                 double max_rise,
-                                                std::optional<float> near_height = std::nullopt) {
+                                                std::optional<float> near_height = std::nullopt,
+                                                float level_tolerance = LevelTolerance) {
     if (!seam.IsSeam()) {
         return std::nullopt;
     }
@@ -920,7 +947,7 @@ inline std::optional<MountClimb> BestMountClimb(const Triangle& seam,
     const auto consider = [&](const Triangle* floor, double px, double pz, int coarse_steps) {
         const float fx = static_cast<float>(px);
         const float fz = static_cast<float>(pz);
-        if (near_height && std::fabs(floor->HeightAt(fx, fz) - *near_height) > LevelTolerance) {
+        if (near_height && std::fabs(floor->HeightAt(fx, fz) - *near_height) > level_tolerance) {
             return false;
         }
         if (!mountable(floor, fx, fz)) {
