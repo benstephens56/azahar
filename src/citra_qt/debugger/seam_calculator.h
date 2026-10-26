@@ -14,6 +14,7 @@
 #include "common/common_types.h"
 
 class EmuThread;
+class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
@@ -57,12 +58,16 @@ private:
         std::optional<u16> camera_yaw; ///< Input yaw of the active camera, if known
         /// Index of the scene collision triangle Link's floor check found, if known
         std::optional<int> floor_poly;
+        /// Size of his wall check
+        SeamMath::WallCheck wall_check;
     };
 
     QWidget* CreateSetupGroup();
     QWidget* CreateMountGroup();
     QWidget* CreateClimbGroup();
 
+    /// Sets the game whose memory layout to read (and shows it)
+    void SetGame(SeamMath::Game new_game);
     std::optional<VAddr> ContextAddress() const;
     std::optional<VAddr> ActorAddress() const;
     std::optional<u32> ReadU32(VAddr address) const;
@@ -94,7 +99,10 @@ private:
     std::optional<SeamMath::Triangle> triangle;
     std::optional<std::array<float, 2>> target;
 
+    SeamMath::Game game = SeamMath::Game::OoT3D;
+
     // Setup
+    QComboBox* game_combo;
     QLineEdit* context_edit;
     QLabel* file_label;
     QSpinBox* radius_spin;

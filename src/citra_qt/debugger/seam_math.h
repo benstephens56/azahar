@@ -532,18 +532,23 @@ inline std::optional<ClimbLine> BestClimbLine(
  */
 constexpr float LevelTolerance = 100.0f;
 
-/// Link's (adult) wall check: a sphere this far up from his feet, with this radius (Player)
-constexpr float WallCheckHeight = 26.0f;
-constexpr float WallCheckRadius = 18.0f;
+/// Link's wall check: a sphere this far up from his feet, with this radius (Player)
+struct WallCheck {
+    float height;
+    float radius;
+};
+/// OoT3D's adult Link
+constexpr WallCheck AdultWallCheck{26.0f, 18.0f};
 
 /// Triangles near a seam that act as walls for Link (neither floors nor ceilings), but the seam
 inline std::vector<const Triangle*> WallsNear(const Triangle& seam,
-                                              std::span<const Triangle> collision) {
+                                              std::span<const Triangle> collision,
+                                              WallCheck wall_check = AdultWallCheck) {
     const auto [seam_min_x, seam_max_x] =
         std::minmax({seam.vertices[0][0], seam.vertices[1][0], seam.vertices[2][0]});
     const auto [seam_min_z, seam_max_z] =
         std::minmax({seam.vertices[0][2], seam.vertices[1][2], seam.vertices[2][2]});
-    const float margin = WallCheckRadius + 2.0f;
+    const float margin = wall_check.radius + 2.0f;
     std::vector<const Triangle*> walls;
     for (const auto& tri : collision) {
         if (&tri == &seam || tri.Ny() > 0.5f || tri.Ny() < -0.8f) {
@@ -622,9 +627,10 @@ inline bool TriChkPointPara(const std::array<std::array<float, 2>, 3>& v, float 
  * so he can't stand there: the game's wall check (BgCheck_SphVsStaticWall) of his wall check
  * sphere, which finds walls along Z and along X with some leniency.
  */
-inline bool WallPushes(std::span<const Triangle* const> walls, float x, float y, float z) {
-    const float cy = y + WallCheckHeight;
-    const float radius = WallCheckRadius;
+inline bool WallPushes(std::span<const Triangle* const> walls, float x, float y, float z,
+                       WallCheck wall_check = AdultWallCheck) {
+    const float cy = y + wall_check.height;
+    const float radius = wall_check.radius;
     for (const Triangle* wall : walls) {
         const auto& v = wall->vertices;
         if (cy < v[0][1] && cy < v[1][1] && cy < v[2][1]) {
@@ -695,7 +701,8 @@ struct MountSpot {
 inline std::optional<MountSpot> FindMountSpot(const Triangle& seam,
                                               std::span<const Triangle> collision, float x, float z,
                                               std::optional<float> near_height = std::nullopt,
-                                              float level_tolerance = LevelTolerance) {
+                                              float level_tolerance = LevelTolerance,
+                                              WallCheck wall_check = AdultWallCheck) {
     if (!seam.IsSeam()) {
         return std::nullopt;
     }
@@ -703,7 +710,7 @@ inline std::optional<MountSpot> FindMountSpot(const Triangle& seam,
     const double s_nz = seam.Nz() / seam.Ny();
     const double s_d = seam.dist / seam.Ny();
     const double radius = CheckDist * 0.999;
-    const auto walls = WallsNear(seam, collision);
+    const auto walls = WallsNear(seam, collision, wall_check);
 
     std::optional<MountSpot> best;
     double best_distance = 0.0;
@@ -758,7 +765,7 @@ inline std::optional<MountSpot> FindMountSpot(const Triangle& seam,
                     ok = floor->ContainsXZ(px, pz) &&
                          (!near_height ||
                           std::fabs(floor->HeightAt(px, pz) - *near_height) <= level_tolerance) &&
-                         !WallPushes(walls, px, floor->HeightAt(px, pz), pz);
+                         !WallPushes(walls, px, floor->HeightAt(px, pz), pz, wall_check);
                     if (ok) {
                         const float height = floor->HeightAt(px, pz);
                         for (const Triangle* other : floors) {
@@ -894,7 +901,8 @@ inline std::optional<MountClimb> BestMountClimb(const Triangle& seam,
                                                 std::span<const Triangle> collision,
                                                 double max_rise,
                                                 std::optional<float> near_height = std::nullopt,
-                                                float level_tolerance = LevelTolerance) {
+                                                float level_tolerance = LevelTolerance,
+                                                WallCheck wall_check = AdultWallCheck) {
     if (!seam.IsSeam()) {
         return std::nullopt;
     }
@@ -925,7 +933,7 @@ inline std::optional<MountClimb> BestMountClimb(const Triangle& seam,
         }
         floors.push_back(&tri);
     }
-    const auto walls = WallsNear(seam, collision);
+    const auto walls = WallsNear(seam, collision, wall_check);
     const auto mountable = [&](const Triangle* floor, float px, float pz) {
         if (!seam.ContainsXZ(px, pz) || !floor->ContainsXZ(px, pz)) {
             return false;
@@ -940,7 +948,7 @@ inline std::optional<MountClimb> BestMountClimb(const Triangle& seam,
             }
         }
         // Somewhere Link can stand, not kept away by a wall
-        return !WallPushes(walls, px, height, pz);
+        return !WallPushes(walls, px, height, pz, wall_check);
     };
 
     std::optional<MountClimb> best;
@@ -1017,11 +1025,16 @@ inline std::optional<MountClimb> BestMountClimb(const Triangle& seam,
     return best;
 }
 
+/// The games the collision files and memory layouts are known for
+enum class Game { OoT3D, MM3D };
+
 /**
- * Reads the scene collision triangles of an OoT3D scene file (e.g. spot00_info.zsi, as extracted
- * from the game or included with exodus122's 3d_model_viewer). Intangible triangles are skipped.
+ * Reads the scene collision triangles of a scene file of the game (e.g. OoT3D's spot00_info.zsi or
+ * MM3D's z2_00keikoku_info.zsi, as extracted from the game or included with exodus122's
+ * 3d_model_viewer). The games lay out the collision header and polygons a little differently.
+ * Intangible triangles are skipped.
  */
-inline std::optional<std::vector<Triangle>> LoadZsi(std::span<const u8> data) {
+inline std::optional<std::vector<Triangle>> LoadZsi(std::span<const u8> data, Game game) {
     const auto read = [&data]<typename T>(std::size_t offset, T& value) {
         if (offset + sizeof(T) > data.size()) {
             return false;
@@ -1051,7 +1064,9 @@ inline std::optional<std::vector<Triangle>> LoadZsi(std::span<const u8> data) {
     u16 num_polygons = 0;
     u32 vertex_list = 0;
     u32 polygon_list = 0;
-    if (!read(header_offset + 0x0C, num_vertices) || !read(header_offset + 0x0E, num_polygons) ||
+    const bool mm = game == Game::MM3D;
+    if (!read(header_offset + (mm ? 0x0E : 0x0C), num_vertices) ||
+        !read(header_offset + (mm ? 0x10 : 0x0E), num_polygons) ||
         !read(header_offset + 0x18, vertex_list) || !read(header_offset + 0x1C, polygon_list)) {
         return std::nullopt;
     }
@@ -1069,7 +1084,7 @@ inline std::optional<std::vector<Triangle>> LoadZsi(std::span<const u8> data) {
         std::array<u16, 3> indices{};
         Triangle tri;
         tri.index = static_cast<int>(i);
-        if (!read(offset + 0x2, indices) || !read(offset + 0xA, tri.normal) ||
+        if (!read(offset + 0x2, indices) || !read(offset + (mm ? 0x8 : 0xA), tri.normal) ||
             !read(offset + 0x10, tri.dist)) {
             return std::nullopt;
         }
@@ -1092,6 +1107,29 @@ inline std::optional<std::vector<Triangle>> LoadZsi(std::span<const u8> data) {
         }
     }
     return triangles;
+}
+
+/**
+ * Reads a scene file of either game, telling which one it is from the file: read the wrong way,
+ * the polygons' normals aren't unit vectors.
+ */
+inline std::optional<std::pair<Game, std::vector<Triangle>>> LoadZsiOfAnyGame(
+    std::span<const u8> data) {
+    for (const Game game : {Game::OoT3D, Game::MM3D}) {
+        auto triangles = LoadZsi(data, game);
+        if (!triangles || triangles->empty()) {
+            continue;
+        }
+        const auto unit = std::count_if(triangles->begin(), triangles->end(), [](const auto& tri) {
+            const float length =
+                std::sqrt(tri.Nx() * tri.Nx() + tri.Ny() * tri.Ny() + tri.Nz() * tri.Nz());
+            return std::fabs(length - 1.0f) < 0.01f;
+        });
+        if (unit >= static_cast<std::ptrdiff_t>(triangles->size() * 99 / 100)) {
+            return std::pair{game, std::move(*triangles)};
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace SeamMath

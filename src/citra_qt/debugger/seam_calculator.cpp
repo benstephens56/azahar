@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
 #include <QFile>
@@ -24,6 +25,7 @@
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QSpinBox>
 #include <QTableWidget>
 #include <QVBoxLayout>
@@ -35,30 +37,94 @@
 
 namespace {
 
-// Offsets in the Actor struct (see include/z3D/z3Dactor.h of the OoT3D practice menu)
-constexpr VAddr OffsetWorldPos = 0x028;
-constexpr VAddr OffsetFloorHeight = 0x084;
-constexpr VAddr OffsetBgCheckFlags = 0x090;
-constexpr VAddr OffsetPrevPos = 0x108;
-constexpr VAddr OffsetWorldRotY = 0x036;
-constexpr VAddr OffsetSpeedXZ = 0x06C;
+/// Where things are in a game's memory
+struct GameLayout {
+    // In the Actor struct
+    VAddr world_pos;
+    VAddr prev_pos;
+    VAddr world_rot_y;
+    VAddr speed_xz;
+    VAddr floor_poly;
+    VAddr floor_height;
+    VAddr bg_check_flags;
+    // In the GlobalContext and Camera structs
+    VAddr main_camera;
+    VAddr camera_global_context; ///< The camera's pointer to its GlobalContext
+    VAddr camera_ptrs;
+    VAddr active_camera;
+    VAddr camera_input_yaw; ///< inputDir.y
+    VAddr collision_header; ///< colCtx.colHeader
+    VAddr header_num_polygons;
+    VAddr header_poly_list;
+    VAddr player_actor; ///< actorCtx.actorList[ACTORTYPE_PLAYER].first
+};
+
+/// See include/z3D/z3Dactor.h and z3D.h of the OoT3D practice menu
+constexpr GameLayout OoT3DLayout{
+    .world_pos = 0x028,
+    .prev_pos = 0x108,
+    .world_rot_y = 0x036,
+    .speed_xz = 0x06C,
+    .floor_poly = 0x07C,
+    .floor_height = 0x084,
+    .bg_check_flags = 0x090,
+    .main_camera = 0x364,
+    .camera_global_context = 0x0D4,
+    .camera_ptrs = 0xA54,
+    .active_camera = 0xA64,
+    .camera_input_yaw = 0x17E,
+    .collision_header = 0xA98,
+    .header_num_polygons = 0x0E,
+    .header_poly_list = 0x1C,
+    // actorCtx (0x208C) .actorList (0x0C) [ACTORTYPE_PLAYER] (2 * 8) .first (4)
+    .player_actor = 0x208C + 0x0C + 2 * 8 + 4,
+};
+
+/**
+ * See code/include/game/{actor,camera,context}.h of the MM3D practice tools. Fields they leave
+ * as gaps are placed from the N64 decomp (zeldaret/mm): MM3D's structs match it, shifted by a few
+ * bytes where the 3DS version adds fields.
+ */
+constexpr GameLayout MM3DLayout{
+    .world_pos = 0x024,
+    .prev_pos = 0x10C,
+    .world_rot_y = 0x032,
+    .speed_xz = 0x070,
+    .floor_poly = 0x080,
+    .floor_height = 0x088,
+    .bg_check_flags = 0x094,
+    .main_camera = 0x408,
+    .camera_global_context = 0x0A0,
+    .camera_ptrs = 0xA68,
+    .active_camera = 0xA78,
+    .camera_input_yaw = 0x14A,
+    // After frameAdvCtx (0xAAC, 8 bytes), as in the N64 PlayState
+    .collision_header = 0xAB4,
+    .header_num_polygons = 0x10,
+    .header_poly_list = 0x1C,
+    // actorCtx.actorList (0x20C0) [ACTORTYPE_PLAYER] (2 * 0xC) .first (4)
+    .player_actor = 0x20C0 + 2 * 0xC + 4,
+};
+
+const GameLayout& LayoutOf(SeamMath::Game game) {
+    return game == SeamMath::Game::MM3D ? MM3DLayout : OoT3DLayout;
+}
+
 constexpr VAddr OffsetActorType = 0x002;
 constexpr u8 ActorTypePlayer = 2;
-
-// Offsets in the GlobalContext and Camera structs (see include/z3D/z3D.h of the practice menu)
-constexpr VAddr OffsetMainCamera = 0x364;
-constexpr VAddr OffsetCameraGlobalContext = 0x0D4;
-constexpr VAddr OffsetCameraPtrs = 0xA54;
-constexpr VAddr OffsetActiveCamera = 0xA64;
-constexpr VAddr OffsetCameraInputYaw = 0x17E; // inputDir.y
-constexpr VAddr OffsetFloorPoly = 0x07C;
-/// colCtx (0xA98) .stat.colHeader (0)
-constexpr VAddr OffsetCollisionHeader = 0xA98;
-constexpr VAddr OffsetHeaderNumPolygons = 0x0E;
-constexpr VAddr OffsetHeaderPolyList = 0x1C;
 constexpr u32 CollisionPolySize = 0x14;
-/// actorCtx (0x208C) .actorList (0x0C) [ACTORTYPE_PLAYER] (2 * 8) .first (4)
-constexpr VAddr OffsetPlayerActor = 0x208C + 0x0C + 2 * 8 + 4;
+
+/// MM3D: Link's form (Player::active_form), which sets the size of his wall check
+constexpr VAddr OffsetMM3DPlayerForm = 0x1FF;
+/// MM3D's wall check for each form (sPlayerAgeProperties in the N64 decomp): Fierce Deity,
+/// Goron, Zora, Deku and human Link, all at 26.8 up from his feet
+constexpr std::array<SeamMath::WallCheck, 5> MM3DWallChecks{{
+    {26.8f, 27.0f},
+    {26.8f, 19.5f},
+    {26.8f, 18.0f},
+    {26.8f, 14.0f},
+    {26.8f, 14.0f},
+}};
 
 constexpr u16 BgCheckGround = 0x0001;
 
@@ -119,6 +185,9 @@ SeamCalculatorWidget::SeamCalculatorWidget(Core::System& system_, QWidget* paren
     setWidget(scroll);
 
     QSettings settings(SettingsPath(), QSettings::IniFormat);
+    SetGame(settings.value(QStringLiteral("game")).toString() == QStringLiteral("MM3D")
+                ? SeamMath::Game::MM3D
+                : SeamMath::Game::OoT3D);
     context_edit->setText(settings.value(QStringLiteral("global_context")).toString());
     address_edit->setText(settings.value(QStringLiteral("actor_address")).toString());
     radius_spin->setValue(settings.value(QStringLiteral("radius"), 200).toInt());
@@ -140,6 +209,9 @@ SeamCalculatorWidget::~SeamCalculatorWidget() {
 
 void SeamCalculatorWidget::SaveSettings() const {
     QSettings settings(SettingsPath(), QSettings::IniFormat);
+    settings.setValue(QStringLiteral("game"), game == SeamMath::Game::MM3D
+                                                  ? QStringLiteral("MM3D")
+                                                  : QStringLiteral("OoT3D"));
     settings.setValue(QStringLiteral("global_context"), context_edit->text());
     settings.setValue(QStringLiteral("actor_address"), address_edit->text());
     settings.setValue(QStringLiteral("radius"), radius_spin->value());
@@ -153,6 +225,17 @@ QWidget* SeamCalculatorWidget::CreateSetupGroup() {
     auto* layout = new QVBoxLayout(group);
 
     auto* context_row = new QHBoxLayout;
+    game_combo = new QComboBox(group);
+    game_combo->addItem(tr("OoT3D"));
+    game_combo->addItem(tr("MM3D"));
+    game_combo->setToolTip(tr("The game, for where to find things in memory. Set automatically by "
+                              "Find and by loading a scene's collision."));
+    connect(game_combo, &QComboBox::currentIndexChanged, this, [this](int index) {
+        SetGame(index == 1 ? SeamMath::Game::MM3D : SeamMath::Game::OoT3D);
+        SaveSettings();
+        Update();
+    });
+    context_row->addWidget(game_combo);
     context_row->addWidget(new QLabel(tr("GlobalContext"), group));
     context_edit = new QLineEdit(group);
     context_edit->setPlaceholderText(tr("Click Find while in game"));
@@ -171,11 +254,13 @@ QWidget* SeamCalculatorWidget::CreateSetupGroup() {
 
     auto* file_row = new QHBoxLayout;
     auto* load_button = new QPushButton(tr("Load Collision..."), group);
-    load_button->setToolTip(tr("Loads the collision of a scene from its .zsi file (e.g. "
-                               "models/OOT3D/spot00_info.zsi of exodus122's 3d_model_viewer)"));
+    load_button->setToolTip(
+        tr("Loads the collision of a scene from its .zsi file (e.g. "
+           "models/OOT3D/spot00_info.zsi or models/MM3D/z2_00keikoku_info.zsi of exodus122's "
+           "3d_model_viewer)"));
     connect(load_button, &QPushButton::clicked, this, [this] {
-        const QString path = QFileDialog::getOpenFileName(
-            this, tr("Load Scene Collision"), collision_path, tr("OoT3D Scene (*.zsi)"));
+        const QString path = QFileDialog::getOpenFileName(this, tr("Load Scene Collision"),
+                                                          collision_path, tr("Scene (*.zsi)"));
         if (!path.isEmpty()) {
             LoadCollision(path);
         }
@@ -253,8 +338,8 @@ QWidget* SeamCalculatorWidget::CreateSetupGroup() {
     }
     address_edit = new QLineEdit(details_widget);
     address_edit->setPlaceholderText(tr("Only needed without the GlobalContext"));
-    address_edit->setToolTip(tr("The start of the player actor. Link's X position is at +0x28, "
-                                "Y at +0x2C and Z at +0x30 from it."));
+    address_edit->setToolTip(tr("The start of the player actor. Link's X, Y and Z position are "
+                                "at +0x28 in OoT3D and at +0x24 in MM3D."));
     connect(address_edit, &QLineEdit::editingFinished, this, [this] {
         SaveSettings();
         Update();
@@ -482,13 +567,15 @@ void SeamCalculatorWidget::UpdateMount(const SeamMath::Triangle& tri, const Link
     if (!on_seam) {
         std::optional<MountSpot> spot;
         for (const auto tolerance : {15.0f, LevelTolerance}) {
-            spot = FindMountSpot(tri, collision, link.x, link.z, link.y, tolerance);
+            spot =
+                FindMountSpot(tri, collision, link.x, link.z, link.y, tolerance, link.wall_check);
             if (spot) {
                 break;
             }
         }
         if (!spot) {
-            spot = FindMountSpot(tri, collision, link.x, link.z);
+            spot = FindMountSpot(tri, collision, link.x, link.z, std::nullopt, LevelTolerance,
+                                 link.wall_check);
         }
         if (spot) {
             target = spot->point;
@@ -760,6 +847,15 @@ std::optional<u16> SeamCalculatorWidget::ReadU16(VAddr address) const {
     return value;
 }
 
+void SeamCalculatorWidget::SetGame(SeamMath::Game new_game) {
+    game = new_game;
+    const int index = game == SeamMath::Game::MM3D ? 1 : 0;
+    if (game_combo->currentIndex() != index) {
+        const QSignalBlocker blocker(game_combo);
+        game_combo->setCurrentIndex(index);
+    }
+}
+
 std::optional<VAddr> SeamCalculatorWidget::ContextAddress() const {
     QString text = context_edit->text().trimmed();
     if (text.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) {
@@ -778,30 +874,40 @@ void SeamCalculatorWidget::FindGlobalContext() {
         return;
     }
     // The main camera keeps a pointer to the GlobalContext it is part of, so the GlobalContext is
-    // at the value of the one word that points to 0x364 + 0xD4 bytes before the word itself
+    // at the value of the one word that points to as many bytes before the word itself as that
+    // pointer is into the GlobalContext (0x364 + 0xD4 in OoT3D, 0x408 + 0xA0 in MM3D)
     auto snapshot = system.MemoryEditor().SnapshotWritableMemory(std::chrono::milliseconds{2000});
     if (!snapshot) {
         QMessageBox::warning(this, tr("Seam Calculator"),
                              tr("Could not read the memory. Is the game running?"));
         return;
     }
-    constexpr VAddr Offset = OffsetMainCamera + OffsetCameraGlobalContext;
     std::optional<VAddr> found;
-    for (const auto& region : *snapshot) {
-        for (std::size_t i = 0; i + 4 <= region.data.size() && !found; i += 4) {
-            u32 value;
-            std::memcpy(&value, region.data.data() + i, sizeof(value));
-            if (value == 0 || region.base + i != value + Offset) {
-                continue;
+    SeamMath::Game found_game = game;
+    for (const auto candidate :
+         {game, game == SeamMath::Game::MM3D ? SeamMath::Game::OoT3D : SeamMath::Game::MM3D}) {
+        const GameLayout& layout = LayoutOf(candidate);
+        const VAddr offset = layout.main_camera + layout.camera_global_context;
+        for (const auto& region : *snapshot) {
+            for (std::size_t i = 0; i + 4 <= region.data.size() && !found; i += 4) {
+                u32 value;
+                std::memcpy(&value, region.data.data() + i, sizeof(value));
+                if (value == 0 || region.base + i != value + offset) {
+                    continue;
+                }
+                // Check that it holds Link's actor
+                const auto player = ReadU32(value + layout.player_actor);
+                const auto type = player && *player
+                                      ? system.MemoryEditor().Peek(*player + OffsetActorType, 1)
+                                      : std::nullopt;
+                if (type && (*type)[0] == ActorTypePlayer) {
+                    found = value;
+                    found_game = candidate;
+                }
             }
-            // Check that it holds Link's actor
-            const auto player = ReadU32(value + OffsetPlayerActor);
-            const auto type = player && *player
-                                  ? system.MemoryEditor().Peek(*player + OffsetActorType, 1)
-                                  : std::nullopt;
-            if (type && (*type)[0] == ActorTypePlayer) {
-                found = value;
-            }
+        }
+        if (found) {
+            break;
         }
     }
     if (!found) {
@@ -810,6 +916,7 @@ void SeamCalculatorWidget::FindGlobalContext() {
                                 "on the title screen or file select)."));
         return;
     }
+    SetGame(found_game);
     context_edit->setText(QStringLiteral("0x%1").arg(*found, 8, 16, QLatin1Char('0')));
     SaveSettings();
     Update();
@@ -817,7 +924,8 @@ void SeamCalculatorWidget::FindGlobalContext() {
 
 std::optional<VAddr> SeamCalculatorWidget::ActorAddress() const {
     if (const auto context = ContextAddress()) {
-        if (const auto player = ReadU32(*context + OffsetPlayerActor); player && *player) {
+        if (const auto player = ReadU32(*context + LayoutOf(game).player_actor);
+            player && *player) {
             return *player;
         }
     }
@@ -848,21 +956,22 @@ std::optional<SeamCalculatorWidget::LinkState> SeamCalculatorWidget::ReadLink() 
     if (!emulation_running || !address) {
         return std::nullopt;
     }
-    const auto x = ReadFloat(*address + OffsetWorldPos);
-    const auto y = ReadFloat(*address + OffsetWorldPos + 4);
-    const auto z = ReadFloat(*address + OffsetWorldPos + 8);
-    const auto prev_x = ReadFloat(*address + OffsetPrevPos);
-    const auto prev_y = ReadFloat(*address + OffsetPrevPos + 4);
-    const auto prev_z = ReadFloat(*address + OffsetPrevPos + 8);
-    const auto floor_height = ReadFloat(*address + OffsetFloorHeight);
-    const auto flags = system.MemoryEditor().Peek(*address + OffsetBgCheckFlags, 2);
+    const GameLayout& layout = LayoutOf(game);
+    const auto x = ReadFloat(*address + layout.world_pos);
+    const auto y = ReadFloat(*address + layout.world_pos + 4);
+    const auto z = ReadFloat(*address + layout.world_pos + 8);
+    const auto prev_x = ReadFloat(*address + layout.prev_pos);
+    const auto prev_y = ReadFloat(*address + layout.prev_pos + 4);
+    const auto prev_z = ReadFloat(*address + layout.prev_pos + 8);
+    const auto floor_height = ReadFloat(*address + layout.floor_height);
+    const auto flags = system.MemoryEditor().Peek(*address + layout.bg_check_flags, 2);
     if (!x || !y || !z || !prev_x || !prev_y || !prev_z || !floor_height || !flags) {
         return std::nullopt;
     }
     u16 bg_check_flags;
     std::memcpy(&bg_check_flags, flags->data(), sizeof(bg_check_flags));
-    const auto yaw = ReadU16(*address + OffsetWorldRotY);
-    const auto speed = ReadFloat(*address + OffsetSpeedXZ);
+    const auto yaw = ReadU16(*address + layout.world_rot_y);
+    const auto speed = ReadFloat(*address + layout.speed_xz);
     if (!yaw || !speed) {
         return std::nullopt;
     }
@@ -870,11 +979,11 @@ std::optional<SeamCalculatorWidget::LinkState> SeamCalculatorWidget::ReadLink() 
     // Input yaw of the active camera (cameraPtrs[activeCamera]->inputDir.y)
     std::optional<u16> camera_yaw;
     if (const auto context = ContextAddress()) {
-        const auto active = ReadU16(*context + OffsetActiveCamera);
+        const auto active = ReadU16(*context + layout.active_camera);
         if (active && *active < 4) {
-            const auto camera = ReadU32(*context + OffsetCameraPtrs + *active * 4);
+            const auto camera = ReadU32(*context + layout.camera_ptrs + *active * 4);
             if (camera && *camera) {
-                camera_yaw = ReadU16(*camera + OffsetCameraInputYaw);
+                camera_yaw = ReadU16(*camera + layout.camera_input_yaw);
             }
         }
     }
@@ -882,11 +991,11 @@ std::optional<SeamCalculatorWidget::LinkState> SeamCalculatorWidget::ReadLink() 
     // Index of Link's floor triangle: floorPoly points into the scene collision's polygon list
     std::optional<int> floor_poly;
     if (const auto context = ContextAddress()) {
-        const auto poly = ReadU32(*address + OffsetFloorPoly);
-        const auto header = ReadU32(*context + OffsetCollisionHeader);
+        const auto poly = ReadU32(*address + layout.floor_poly);
+        const auto header = ReadU32(*context + layout.collision_header);
         if (poly && *poly && header && *header) {
-            const auto poly_list = ReadU32(*header + OffsetHeaderPolyList);
-            const auto count = ReadU16(*header + OffsetHeaderNumPolygons);
+            const auto poly_list = ReadU32(*header + layout.header_poly_list);
+            const auto count = ReadU16(*header + layout.header_num_polygons);
             if (poly_list && count && *poly >= *poly_list &&
                 (*poly - *poly_list) % CollisionPolySize == 0 &&
                 (*poly - *poly_list) / CollisionPolySize < *count) {
@@ -894,9 +1003,19 @@ std::optional<SeamCalculatorWidget::LinkState> SeamCalculatorWidget::ReadLink() 
             }
         }
     }
+
+    // The size of his wall check: in MM3D, it depends on his form
+    SeamMath::WallCheck wall_check = SeamMath::AdultWallCheck;
+    if (game == SeamMath::Game::MM3D) {
+        const auto form = system.MemoryEditor().Peek(*address + OffsetMM3DPlayerForm, 1);
+        wall_check = MM3DWallChecks.back();
+        if (form && (*form)[0] < MM3DWallChecks.size()) {
+            wall_check = MM3DWallChecks[(*form)[0]];
+        }
+    }
     return LinkState{
-        *x,   *y,     *z,         *prev_x,   *prev_y, *prev_z, *floor_height, bg_check_flags,
-        *yaw, *speed, camera_yaw, floor_poly};
+        *x,   *y,     *z,         *prev_x,    *prev_y,   *prev_z, *floor_height, bg_check_flags,
+        *yaw, *speed, camera_yaw, floor_poly, wall_check};
 }
 
 void SeamCalculatorWidget::LoadCollision(const QString& path) {
@@ -906,14 +1025,15 @@ void SeamCalculatorWidget::LoadCollision(const QString& path) {
         return;
     }
     const QByteArray data = file.readAll();
-    auto triangles = SeamMath::LoadZsi(
+    auto loaded = SeamMath::LoadZsiOfAnyGame(
         std::span<const u8>(reinterpret_cast<const u8*>(data.constData()), data.size()));
-    if (!triangles) {
+    if (!loaded) {
         QMessageBox::warning(this, tr("Seam Calculator"),
-                             tr("%1 is not an OoT3D scene file with collision.").arg(path));
+                             tr("%1 is not an OoT3D or MM3D scene file with collision.").arg(path));
         return;
     }
-    collision = std::move(*triangles);
+    SetGame(loaded->first);
+    collision = std::move(loaded->second);
     collision_path = path;
     const auto seams = std::count_if(collision.begin(), collision.end(),
                                      [](const auto& tri) { return tri.IsSeam(); });
@@ -1035,7 +1155,8 @@ void SeamCalculatorWidget::MoveLinkToTarget() {
     auto& editor = system.MemoryEditor();
     const auto [x, z] = *target;
     // The previous position too, so the move isn't checked against walls as movement
-    for (const VAddr base : {*address + OffsetWorldPos, *address + OffsetPrevPos}) {
+    for (const VAddr base :
+         {*address + LayoutOf(game).world_pos, *address + LayoutOf(game).prev_pos}) {
         editor.QueueWrite(base, FloatBytes(x));
         editor.QueueWrite(base + 8, FloatBytes(z));
     }
