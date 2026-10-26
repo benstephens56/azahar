@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <optional>
 #include <vector>
 #include <QDockWidget>
 #include <QTimer>
@@ -24,6 +25,9 @@ class System;
  *
  * Reading values has no effect on emulation. Edits and freezes are applied on the emulator thread
  * through Core::MemoryEditor, and only while the user has any of them active.
+ *
+ * Addresses can be relative to Link's actor or the GlobalContext (e.g. "Link+24"), which the game
+ * moves around, so they keep pointing at the same thing (see GameContext::EvaluateAddress).
  *
  * The list is saved per application (by title ID) and restored when that application starts.
  */
@@ -58,11 +62,21 @@ private:
 
     struct WatchEntry {
         QString label;
-        VAddr address = 0;
+        /// Address, as entered (see GameContext::EvaluateAddress)
+        QString address;
         MemoryTools::ValueType type = MemoryTools::ValueType::U32;
         /// Show (and enter) the value in hexadecimal
         bool hex = false;
+
+        /// Where the address is now, if it can be evaluated
+        std::optional<VAddr> resolved;
+        /// Where the value is frozen and to what, while it is
+        std::optional<VAddr> frozen_at;
+        std::vector<u8> frozen_bytes;
     };
+
+    /// Evaluates the entry's address, and moves its freeze along if the address moved
+    void Resolve(WatchEntry& entry);
 
     void RebuildTable();
     void UpdateValues();
@@ -75,7 +89,8 @@ private:
     void OnExport();
     void UpdateTimerState();
 
-    void SetFrozen(const WatchEntry& entry, bool frozen);
+    void SetFrozen(WatchEntry& entry, bool frozen);
+    void Unfreeze(WatchEntry& entry);
 
     QString ListPath() const;
     void LoadList(const QString& path);

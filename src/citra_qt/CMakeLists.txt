@@ -98,6 +98,8 @@ add_library(citra_qt STATIC EXCLUDE_FROM_ALL
     dead_space_docks.h
     debugger/console.h
     debugger/console.cpp
+    debugger/game_context.cpp
+    debugger/game_context.h
     debugger/graphics/graphics.cpp
     debugger/graphics/graphics.h
     debugger/graphics/graphics_breakpoint_observer.cpp

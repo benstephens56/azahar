@@ -15,6 +15,7 @@
 #include <QTableWidget>
 #include <QVBoxLayout>
 #include <fmt/format.h>
+#include "citra_qt/debugger/game_context.h"
 #include "citra_qt/debugger/memory_watch.h"
 #include "common/file_util.h"
 #include "core/core.h"
@@ -109,6 +110,9 @@ QString MemoryWatchWidget::ListPath() const {
 }
 
 void MemoryWatchWidget::LoadList(const QString& path) {
+    for (auto& entry : entries) {
+        Unfreeze(entry);
+    }
     entries.clear();
     QSettings settings(path, QSettings::IniFormat);
     const int count = settings.beginReadArray(QStringLiteral("Watches"));
@@ -116,7 +120,9 @@ void MemoryWatchWidget::LoadList(const QString& path) {
         settings.setArrayIndex(i);
         WatchEntry entry;
         entry.label = settings.value(QStringLiteral("label")).toString();
-        entry.address = settings.value(QStringLiteral("address"), 0).toUInt();
+        entry.address = settings.contains(QStringLiteral("address_text"))
+                            ? settings.value(QStringLiteral("address_text")).toString()
+                            : FormatAddress(settings.value(QStringLiteral("address"), 0).toUInt());
         entry.type =
             static_cast<ValueType>(std::clamp(settings.value(QStringLiteral("type"), 4).toInt(), 0,
                                               static_cast<int>(ValueType::Float)));
@@ -135,7 +141,11 @@ void MemoryWatchWidget::SaveList(const QString& path) const {
     for (std::size_t i = 0; i < entries.size(); ++i) {
         settings.setArrayIndex(static_cast<int>(i));
         settings.setValue(QStringLiteral("label"), entries[i].label);
-        settings.setValue(QStringLiteral("address"), entries[i].address);
+        settings.setValue(QStringLiteral("address_text"), entries[i].address);
+        // Plain addresses also the old way, for builds without address expressions
+        if (const auto address = ParseAddress(entries[i].address)) {
+            settings.setValue(QStringLiteral("address"), *address);
+        }
         settings.setValue(QStringLiteral("type"), static_cast<int>(entries[i].type));
         settings.setValue(QStringLiteral("hex"), entries[i].hex);
     }
@@ -161,6 +171,10 @@ void MemoryWatchWidget::OnEmulationStarting(EmuThread*) {
 
 void MemoryWatchWidget::OnEmulationStopping() {
     SaveList(ListPath());
+    for (auto& entry : entries) {
+        entry.resolved.reset();
+        entry.frozen_at.reset();
+    }
     emulation_running = false;
     UpdateTimerState();
     UpdateValues();
@@ -185,7 +199,11 @@ void MemoryWatchWidget::UpdateTimerState() {
 }
 
 void MemoryWatchWidget::AddWatch(const QString& label, VAddr address, ValueType type) {
-    entries.push_back({label, address, type});
+    WatchEntry entry;
+    entry.label = label;
+    entry.address = FormatAddress(address);
+    entry.type = type;
+    entries.push_back(std::move(entry));
     RebuildTable();
     table->scrollToBottom();
     SaveList(ListPath());
@@ -199,11 +217,16 @@ void MemoryWatchWidget::RebuildTable() {
 
         auto* freeze_item = new QTableWidgetItem();
         freeze_item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsUserCheckable);
-        freeze_item->setCheckState(Qt::Unchecked);
+        freeze_item->setCheckState(entry.frozen_at ? Qt::Checked : Qt::Unchecked);
         table->setItem(row, ColumnFreeze, freeze_item);
 
         table->setItem(row, ColumnLabel, new QTableWidgetItem(entry.label));
-        table->setItem(row, ColumnAddress, new QTableWidgetItem(FormatAddress(entry.address)));
+        auto* address_item = new QTableWidgetItem(entry.address);
+        address_item->setToolTip(tr("A hexadecimal address, or one relative to Link's actor or "
+                                    "the GlobalContext, which follows them when the game moves "
+                                    "them: e.g. Link+24, GlobalContext+20DC or "
+                                    "[GlobalContext+AB4]+10 ([...] reads a pointer)"));
+        table->setItem(row, ColumnAddress, address_item);
         table->setItem(row, ColumnType,
                        new QTableWidgetItem(TypeNames()[static_cast<int>(entry.type)]));
 
@@ -222,7 +245,8 @@ void MemoryWatchWidget::UpdateValues() {
 
     updating = true;
     for (int row = 0; row < static_cast<int>(entries.size()); ++row) {
-        const auto& entry = entries[row];
+        auto& entry = entries[row];
+        Resolve(entry);
         auto* value_item = table->item(row, ColumnValue);
         auto* freeze_item = table->item(row, ColumnFreeze);
         if (!value_item || !freeze_item) {
@@ -236,7 +260,8 @@ void MemoryWatchWidget::UpdateValues() {
 
         QString text = QStringLiteral("-");
         if (emulation_running) {
-            const auto bytes = editor.Peek(entry.address, ValueSize(entry.type));
+            const auto bytes =
+                entry.resolved ? editor.Peek(*entry.resolved, ValueSize(entry.type)) : std::nullopt;
             text = bytes
                        ? FormatValue(entry.type, RawFromBytes(entry.type, bytes->data()), entry.hex)
                        : tr("(unreadable)");
@@ -244,8 +269,18 @@ void MemoryWatchWidget::UpdateValues() {
         if (value_item->text() != text) {
             value_item->setText(text);
         }
+        // Where a relative address is now
+        if (auto* address_item = table->item(row, ColumnAddress);
+            address_item && GameContext::IsRelativeAddress(entry.address)) {
+            const QString where = entry.resolved
+                                      ? tr("Now at %1").arg(FormatAddress(*entry.resolved))
+                                      : tr("Not found now");
+            if (address_item->toolTip() != where) {
+                address_item->setToolTip(where);
+            }
+        }
 
-        const auto state = editor.IsFrozen(entry.address) ? Qt::Checked : Qt::Unchecked;
+        const auto state = entry.frozen_at ? Qt::Checked : Qt::Unchecked;
         if (freeze_item->checkState() != state) {
             freeze_item->setCheckState(state);
         }
@@ -253,15 +288,36 @@ void MemoryWatchWidget::UpdateValues() {
     updating = false;
 }
 
-void MemoryWatchWidget::SetFrozen(const WatchEntry& entry, bool frozen) {
-    auto& editor = system.MemoryEditor();
-    if (!frozen) {
-        editor.Unfreeze(entry.address);
+void MemoryWatchWidget::Resolve(WatchEntry& entry) {
+    entry.resolved =
+        emulation_running ? GameContext::ResolveAddress(system, entry.address) : std::nullopt;
+    // Keep a frozen value frozen where the address is now
+    if (entry.frozen_at && entry.resolved && *entry.resolved != *entry.frozen_at) {
+        auto& editor = system.MemoryEditor();
+        editor.Unfreeze(*entry.frozen_at);
+        editor.Freeze(*entry.resolved, entry.frozen_bytes);
+        entry.frozen_at = entry.resolved;
+    }
+}
+
+void MemoryWatchWidget::Unfreeze(WatchEntry& entry) {
+    if (entry.frozen_at) {
+        system.MemoryEditor().Unfreeze(*entry.frozen_at);
+        entry.frozen_at.reset();
+    }
+}
+
+void MemoryWatchWidget::SetFrozen(WatchEntry& entry, bool frozen) {
+    Unfreeze(entry);
+    if (!frozen || !entry.resolved) {
         return;
     }
     // Freeze the value the address currently has
-    if (const auto bytes = editor.Peek(entry.address, ValueSize(entry.type))) {
-        editor.Freeze(entry.address, *bytes);
+    auto& editor = system.MemoryEditor();
+    if (const auto bytes = editor.Peek(*entry.resolved, ValueSize(entry.type))) {
+        editor.Freeze(*entry.resolved, *bytes);
+        entry.frozen_at = entry.resolved;
+        entry.frozen_bytes = *bytes;
     }
 }
 
@@ -283,22 +339,26 @@ void MemoryWatchWidget::OnItemChanged(QTableWidgetItem* item) {
     case ColumnLabel:
         entry.label = item->text();
         break;
-    case ColumnAddress:
-        if (const auto address = ParseAddress(item->text())) {
-            if (editor.IsFrozen(entry.address)) {
-                editor.Unfreeze(entry.address);
-            }
-            entry.address = *address;
+    case ColumnAddress: {
+        const QString text = item->text().trimmed();
+        if (GameContext::IsValidAddress(text)) {
+            Unfreeze(entry);
+            // Plain addresses are shown the usual way
+            const auto plain =
+                GameContext::IsRelativeAddress(text) ? std::nullopt : ParseAddress(text);
+            entry.address = plain ? FormatAddress(*plain) : text;
+            Resolve(entry);
         }
         updating = true;
-        item->setText(FormatAddress(entry.address));
+        item->setText(entry.address);
         updating = false;
         break;
+    }
     case ColumnType: {
         const int index = TypeNames().indexOf(item->text());
         if (index >= 0) {
             entry.type = static_cast<ValueType>(index);
-            if (editor.IsFrozen(entry.address)) {
+            if (entry.frozen_at) {
                 SetFrozen(entry, true);
             }
         }
@@ -316,12 +376,14 @@ void MemoryWatchWidget::OnItemChanged(QTableWidgetItem* item) {
             // Hex rows take hexadecimal input with or without the 0x prefix
             text.prepend(QStringLiteral("0x"));
         }
-        if (const auto raw = ParseValue(entry.type, text); raw && emulation_running) {
+        if (const auto raw = ParseValue(entry.type, text);
+            raw && emulation_running && entry.resolved) {
             auto bytes = BytesFromRaw(entry.type, *raw);
-            if (editor.IsFrozen(entry.address)) {
-                editor.Freeze(entry.address, std::move(bytes));
+            if (entry.frozen_at) {
+                entry.frozen_bytes = bytes;
+                editor.Freeze(*entry.frozen_at, std::move(bytes));
             } else {
-                editor.QueueWrite(entry.address, std::move(bytes));
+                editor.QueueWrite(*entry.resolved, std::move(bytes));
             }
         }
         break;
@@ -345,6 +407,7 @@ void MemoryWatchWidget::OnRemove() {
     std::sort(rows.begin(), rows.end(),
               [](const QModelIndex& a, const QModelIndex& b) { return a.row() > b.row(); });
     for (const auto& index : rows) {
+        Unfreeze(entries[index.row()]);
         entries.erase(entries.begin() + index.row());
     }
     RebuildTable();
@@ -364,6 +427,9 @@ void MemoryWatchWidget::OnMove(int direction) {
 }
 
 void MemoryWatchWidget::OnClear() {
+    for (auto& entry : entries) {
+        Unfreeze(entry);
+    }
     entries.clear();
     RebuildTable();
     SaveList(ListPath());

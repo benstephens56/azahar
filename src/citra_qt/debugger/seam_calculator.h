@@ -14,6 +14,10 @@
 #include "common/common_types.h"
 
 class EmuThread;
+namespace GameContext {
+class Tracker;
+}
+
 class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
@@ -68,6 +72,8 @@ private:
 
     /// Sets the game whose memory layout to read (and shows it)
     void SetGame(SeamMath::Game new_game);
+    /// Shows the game and GlobalContext in use
+    void ShowContext();
     std::optional<VAddr> ContextAddress() const;
     std::optional<VAddr> ActorAddress() const;
     std::optional<u32> ReadU32(VAddr address) const;
@@ -99,7 +105,10 @@ private:
     std::optional<SeamMath::Triangle> triangle;
     std::optional<std::array<float, 2>> target;
 
-    SeamMath::Game game = SeamMath::Game::OoT3D;
+    /// The game and its GlobalContext (shared with the other tools)
+    GameContext::Tracker& tracker;
+    /// Tracker generation the fields show
+    u64 shown_generation = 0;
 
     // Setup
     QComboBox* game_combo;
