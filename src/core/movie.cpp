@@ -1034,9 +1034,14 @@ ControllerState Movie::TasResolve(const ControllerState& live) {
         state.extra_hid_response.hex = live.extra_hid_response.hex;
         state.extra_hid_response.zl_not_held.Assign(v.zl ? 0 : 1);
         state.extra_hid_response.zr_not_held.Assign(v.zr ? 0 : 1);
+        // The raw value closest to the centre that reads back as exactly this value (see TasFrame
+        // reading above, which rounds toward the centre)
         const auto to_extra_hid = [](s16 value) {
-            return static_cast<u32>(std::clamp(
-                ExtraHidCStickCenter + value * ExtraHidCStickRadius / CStickMax, 0, 0xFFF));
+            const int scaled = value * ExtraHidCStickRadius;
+            const int offset = value > 0   ? (scaled + CStickMax - 1) / CStickMax
+                               : value < 0 ? -((-scaled + CStickMax - 1) / CStickMax)
+                                           : 0;
+            return static_cast<u32>(std::clamp(ExtraHidCStickCenter + offset, 0, 0xFFF));
         };
         state.extra_hid_response.c_stick_x.Assign(to_extra_hid(v.c_stick_x));
         state.extra_hid_response.c_stick_y.Assign(to_extra_hid(v.c_stick_y));

@@ -5,6 +5,7 @@
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/frontend/emu_window.h"
+#include "core/perf_stats.h"
 #include "core/tracer/recorder.h"
 #include "video_core/debug_utils/debug_utils.h"
 #include "video_core/renderer_base.h"
@@ -63,6 +64,9 @@ void RendererBase::EndFrame() {
 
 void RendererBase::RefreshScreen() {
     refreshing_screen = true;
+    // Draw even with "skip duplicate frames" on: the game hasn't presented a frame since the state
+    // was loaded, but the screen has to show the loaded one instead of the one from before
+    Core::PerfStats::game_frames_updated = true;
     SwapBuffers();
     refreshing_screen = false;
 }
